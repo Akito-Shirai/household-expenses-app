@@ -1,0 +1,136 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:household_mvp/models/transaction.dart';
+import 'package:household_mvp/repositories/transaction_repository.dart';
+
+/// テスト用Transactionヘルパー
+Transaction _tx({
+  required String type,
+  required int amount,
+  String categoryName = 'テスト',
+}) {
+  return Transaction(
+    id: 'dummy-id',
+    userId: 'dummy-user',
+    categoryId: 'dummy-cat',
+    date: DateTime(2026, 2, 1),
+    amount: amount,
+    type: type,
+    createdAt: DateTime.now(),
+    updatedAt: DateTime.now(),
+    categoryName: categoryName,
+  );
+}
+
+void main() {
+  group('TransactionRepository.summarize', () {
+    test('空リストの場合すべてゼロ', () {
+      final summary = TransactionRepository.summarize([]);
+      expect(summary.totalExpense, 0);
+      expect(summary.totalIncome, 0);
+      expect(summary.net, 0);
+      expect(summary.expenseByCategory, isEmpty);
+      expect(summary.incomeByCategory, isEmpty);
+    });
+
+    test('支出のみの集計', () {
+      final transactions = [
+        _tx(type: 'expense', amount: 1000, categoryName: '食費'),
+        _tx(type: 'expense', amount: 2000, categoryName: '交通費'),
+        _tx(type: 'expense', amount: 500, categoryName: '食費'),
+      ];
+
+      final summary = TransactionRepository.summarize(transactions);
+
+      expect(summary.totalExpense, 3500);
+      expect(summary.totalIncome, 0);
+      expect(summary.net, -3500);
+      expect(summary.expenseByCategory, {'食費': 1500, '交通費': 2000});
+      expect(summary.incomeByCategory, isEmpty);
+    });
+
+    test('収入のみの集計', () {
+      final transactions = [
+        _tx(type: 'income', amount: 300000, categoryName: '給与'),
+        _tx(type: 'income', amount: 5000, categoryName: '副業'),
+      ];
+
+      final summary = TransactionRepository.summarize(transactions);
+
+      expect(summary.totalExpense, 0);
+      expect(summary.totalIncome, 305000);
+      expect(summary.net, 305000);
+      expect(summary.incomeByCategory, {'給与': 300000, '副業': 5000});
+    });
+
+    test('支出と収入の混在', () {
+      final transactions = [
+        _tx(type: 'income', amount: 300000, categoryName: '給与'),
+        _tx(type: 'expense', amount: 50000, categoryName: '家賃'),
+        _tx(type: 'expense', amount: 30000, categoryName: '食費'),
+        _tx(type: 'income', amount: 10000, categoryName: '副業'),
+      ];
+
+      final summary = TransactionRepository.summarize(transactions);
+
+      expect(summary.totalExpense, 80000);
+      expect(summary.totalIncome, 310000);
+      expect(summary.net, 230000);
+      expect(summary.expenseByCategory, {'家賃': 50000, '食費': 30000});
+      expect(summary.incomeByCategory, {'給与': 300000, '副業': 10000});
+    });
+
+    test('categoryNameがnullの場合「不明」に集約', () {
+      final tx = Transaction(
+        id: 'id',
+        userId: 'user',
+        categoryId: 'cat',
+        date: DateTime(2026, 2, 1),
+        amount: 1000,
+        type: 'expense',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+        categoryName: null,
+      );
+
+      final summary = TransactionRepository.summarize([tx]);
+
+      expect(summary.expenseByCategory, {'不明': 1000});
+    });
+  });
+
+  group('月境界テスト', () {
+    test('listByMonthの日付フィルタ範囲が正しい', () {
+      // listByMonthで使われるのと同じロジックで境界を検証
+      const year = 2026;
+      const month = 2;
+      final startDate = DateTime(year, month, 1);
+      final endDate = DateTime(year, month + 1, 1);
+
+      final start = startDate.toIso8601String().substring(0, 10);
+      final end = endDate.toIso8601String().substring(0, 10);
+
+      // 2月の範囲: 2026-02-01 <= date < 2026-03-01
+      expect(start, '2026-02-01');
+      expect(end, '2026-03-01');
+
+      // 2/28は範囲内（2/28 >= 2/1 && 2/28 < 3/1）
+      final feb28 = DateTime(2026, 2, 28);
+      expect(!feb28.isBefore(startDate) && feb28.isBefore(endDate), isTrue);
+
+      // 3/1は範囲外（3/1 < 3/1 は false）
+      final mar1 = DateTime(2026, 3, 1);
+      expect(!mar1.isBefore(startDate) && mar1.isBefore(endDate), isFalse);
+    });
+
+    test('12月→1月の年跨ぎ境界', () {
+      final startDate = DateTime(2025, 12, 1);
+      final endDate = DateTime(2025, 13, 1); // DartのDateTimeは自動繰り上げ
+
+      final start = startDate.toIso8601String().substring(0, 10);
+      final end = endDate.toIso8601String().substring(0, 10);
+
+      expect(start, '2025-12-01');
+      expect(end, '2026-01-01');
+    });
+  });
+}
