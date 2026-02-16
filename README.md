@@ -42,6 +42,7 @@ dart format .
 
 1. `20260215000000_create_categories_and_transactions.sql` — テーブル定義 + RLS + トリガー
 2. `20260216000000_alter_user_id_defaults_and_composite_fk.sql` — 既存環境への差分適用（default / 複合FK）
+3. `20260216100000_create_user_settings.sql` — ユーザー設定テーブル（表示通貨・為替レート）
 
 ### migration 適用確認
 
@@ -62,6 +63,26 @@ where schemaname = 'public'
   and tablename in ('categories', 'transactions')
 order by tablename, policyname;
 ```
+
+## 通貨設定
+
+### 表示通貨の変更
+
+設定画面の「表示通貨設定」セクションで、金額の表示通貨を変更できます。
+
+- **対応通貨**: JPY (¥), USD ($), AUD (A$), EUR (€), GBP (£)
+- **為替レート**: 手動で設定します（例: 1 USD = 150 JPY の場合、`150` と入力）
+- **保存値**: すべての金額はJPY基準で保存されます。表示時にのみ換算されます
+
+### 手動レート運用
+
+1. 設定画面を開く
+2. 表示通貨を選択（例: USD）
+3. 為替レートを入力（例: `150.5`）— 「1 表示通貨 = ? JPY」の形式
+4. 「通貨設定を保存」をタップ
+5. ホーム画面に戻ると、金額が選択通貨で表示されます
+
+> レート未設定の場合はJPY表示にフォールバックし、SnackBarで通知されます。
 
 ## トラブルシューティング
 

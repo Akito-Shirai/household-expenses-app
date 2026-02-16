@@ -4,16 +4,25 @@ import 'package:flutter/services.dart';
 import '../main.dart';
 import '../models/category.dart';
 import '../models/transaction.dart' as model;
+import '../models/user_settings.dart';
 import '../repositories/category_repository.dart';
 import '../repositories/transaction_repository.dart';
 import '../utils/error_handler.dart';
+import '../utils/fx_converter.dart';
 
 /// 取引の作成/編集画面
 class TransactionEditScreen extends StatefulWidget {
   /// 編集対象（nullなら新規作成）
   final model.Transaction? existing;
 
-  const TransactionEditScreen({super.key, this.existing});
+  /// 通貨設定（表示通貨の記号表示に使用）
+  final UserSettings userSettings;
+
+  const TransactionEditScreen({
+    super.key,
+    this.existing,
+    required this.userSettings,
+  });
 
   @override
   State<TransactionEditScreen> createState() => _TransactionEditScreenState();
@@ -34,6 +43,10 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
   bool _isSaving = false;
 
   bool get _isEditing => widget.existing != null;
+
+  /// 通貨記号（設定通貨に連動）
+  String get _currencySymbol =>
+      MoneyFormatter.symbol(widget.userSettings.displayCurrency);
 
   @override
   void initState() {
@@ -273,10 +286,13 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
                     // 金額
                     TextFormField(
                       controller: _amountController,
-                      decoration: const InputDecoration(
-                        labelText: '金額',
-                        border: OutlineInputBorder(),
-                        prefixText: '¥ ',
+                      decoration: InputDecoration(
+                        labelText: '金額 (JPY)',
+                        border: const OutlineInputBorder(),
+                        prefixText: '$_currencySymbol ',
+                        helperText: widget.userSettings.displayCurrency != 'JPY'
+                            ? '※ 入力はJPY基準です'
+                            : null,
                       ),
                       keyboardType: TextInputType.number,
                       inputFormatters: [FilteringTextInputFormatter.digitsOnly],

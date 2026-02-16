@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 
 import '../main.dart';
 import '../models/transaction.dart' as model;
+import '../models/user_settings.dart';
 import '../repositories/transaction_repository.dart';
+import '../repositories/user_settings_repository.dart';
 import '../utils/error_handler.dart';
+import '../utils/fx_converter.dart';
 import 'settings_screen.dart';
 import 'transaction_edit_screen.dart';
 
@@ -17,15 +20,24 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   final _txRepo = TransactionRepository(supabase);
+  final _settingsRepo = UserSettingsRepository(supabase);
 
   late int _year;
   late int _month;
   List<model.Transaction> _transactions = [];
   MonthlySummary? _summary;
+  UserSettings? _userSettings;
   bool _isLoading = true;
+
+  /// レート未設定通知を1回だけ表示するフラグ
+  bool _rateMissingNotified = false;
 
   /// 非同期競合防止用トークン（最新リクエストのみ反映）
   int _loadToken = 0;
+
+  /// フォールバック用のデフォルト設定
+  UserSettings get _settings =>
+      _userSettings ?? UserSettings.defaults(supabase.auth.currentUser?.id ?? '');
 
   @override
   void initState() {
@@ -42,13 +54,39 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() => _isLoading = true);
     try {
       final transactions = await _txRepo.listByMonth(_year, _month);
+      // 通貨設定の取得（失敗してもフォールバックで動作）
+      UserSettings? settings;
+      try {
+        settings = await _settingsRepo.getOrCreate();
+      } catch (e) {
+        debugPrint('通貨設定読み込みエラー: $e');
+      }
       if (token != _loadToken || !mounted) return;
       final summary = TransactionRepository.summarize(transactions);
       setState(() {
         _transactions = transactions;
         _summary = summary;
+        if (settings != null) _userSettings = settings;
         _isLoading = false;
       });
+      // レート未設定時の通知（同一セッション内で1回のみ）
+      if (!_rateMissingNotified &&
+          settings != null &&
+          settings.displayCurrency != 'JPY' &&
+          settings.effectiveRate == null &&
+          mounted) {
+        _rateMissingNotified = true;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('為替レートが未設定のため、JPYで表示しています'),
+          ),
+        );
+      }
+      // 設定が正常に反映された場合はフラグをリセット（次回通貨変更時に再通知可能に）
+      if (settings != null &&
+          (settings.displayCurrency == 'JPY' || settings.effectiveRate != null)) {
+        _rateMissingNotified = false;
+      }
     } catch (e) {
       if (token != _loadToken || !mounted) return;
       setState(() => _isLoading = false);
@@ -92,7 +130,10 @@ class _HomeScreenState extends State<HomeScreen> {
     final result = await Navigator.push<bool>(
       context,
       MaterialPageRoute(
-        builder: (_) => TransactionEditScreen(existing: existing),
+        builder: (_) => TransactionEditScreen(
+          existing: existing,
+          userSettings: _settings,
+        ),
       ),
     );
     if (!mounted) return;
@@ -107,17 +148,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     if (!mounted) return;
     _load();
-  }
-
-  /// 金額フォーマット（3桁カンマ区切り）
-  String _formatAmount(int amount) {
-    final str = amount.toString();
-    final buffer = StringBuffer();
-    for (var i = 0; i < str.length; i++) {
-      if (i > 0 && (str.length - i) % 3 == 0) buffer.write(',');
-      buffer.write(str[i]);
-    }
-    return buffer.toString();
   }
 
   Widget _buildSummaryCard() {
@@ -181,14 +211,12 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _summaryItem(String label, int amount, Color color) {
-    // N-3: 収支がマイナスの場合は符号付き表示
-    final prefix = amount < 0 ? '-¥' : '¥';
     return Column(
       children: [
         Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
         const SizedBox(height: 4),
         Text(
-          '$prefix${_formatAmount(amount.abs())}',
+          MoneyFormatter.formatSigned(amount, _settings),
           style: TextStyle(
             fontSize: 18,
             fontWeight: FontWeight.bold,
@@ -207,7 +235,7 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           Text(name, style: const TextStyle(fontSize: 13)),
           Text(
-            '¥${_formatAmount(amount)}',
+            MoneyFormatter.format(amount, _settings),
             style: const TextStyle(fontSize: 13),
           ),
         ],
@@ -234,7 +262,7 @@ class _HomeScreenState extends State<HomeScreen> {
             '${tx.date.month}/${tx.date.day}${tx.memo != null && tx.memo!.isNotEmpty ? '  ${tx.memo}' : ''}',
           ),
           trailing: Text(
-            '${isExpense ? '-' : '+'}¥${_formatAmount(tx.amount)}',
+            MoneyFormatter.formatWithSign(tx.amount, _settings, isExpense: isExpense),
             style: TextStyle(
               fontWeight: FontWeight.bold,
               color: isExpense ? Colors.red : Colors.blue,
