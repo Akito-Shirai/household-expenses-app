@@ -5,8 +5,10 @@ import '../models/transaction.dart' as model;
 import '../models/user_settings.dart';
 import '../repositories/transaction_repository.dart';
 import '../repositories/user_settings_repository.dart';
+import '../theme/app_theme.dart';
 import '../utils/error_handler.dart';
 import '../utils/fx_converter.dart';
+import '../widgets/state_views.dart';
 import 'settings_screen.dart';
 import 'transaction_edit_screen.dart';
 
@@ -28,6 +30,7 @@ class _HomeScreenState extends State<HomeScreen> {
   MonthlySummary? _summary;
   UserSettings? _userSettings;
   bool _isLoading = true;
+  String? _errorMessage;
 
   /// レート未設定通知を1回だけ表示するフラグ
   bool _rateMissingNotified = false;
@@ -51,7 +54,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _load() async {
     final token = ++_loadToken;
     if (!mounted) return;
-    setState(() => _isLoading = true);
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
     try {
       final transactions = await _txRepo.listByMonth(_year, _month);
       // 通貨設定の取得（失敗してもフォールバックで動作）
@@ -89,13 +95,21 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } catch (e) {
       if (token != _loadToken || !mounted) return;
-      setState(() => _isLoading = false);
-      await handleError(
+      // 認証系エラー（42501）はhandleErrorで処理（セッション切れ→サインアウト導線）
+      final signedOut = await handleError(
         context: context,
         error: e,
         debugLabel: '取引読み込みエラー',
         userMessage: 'データの読み込みに失敗しました',
       );
+      if (!mounted) return;
+      // サインアウトされた場合はErrorStateView不要（AuthGateでログイン画面に遷移）
+      if (!signedOut) {
+        setState(() {
+          _isLoading = false;
+          _errorMessage = 'データの読み込みに失敗しました';
+        });
+      }
     }
   }
 
@@ -154,48 +168,77 @@ class _HomeScreenState extends State<HomeScreen> {
     final summary = _summary;
     if (summary == null) return const SizedBox.shrink();
 
+    final netColor = summary.net >= 0
+        ? AppTheme.positiveColor
+        : AppTheme.expenseColor;
+
     return Card(
-      margin: const EdgeInsets.all(16),
+      margin: const EdgeInsets.symmetric(
+        horizontal: AppTheme.spacingMd,
+        vertical: AppTheme.spacingSm,
+      ),
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(AppTheme.spacingMd),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 収支サマリー
+            // 収支（最も強調）
+            Text(
+              '収支',
+              style: TextStyle(
+                fontSize: 13,
+                color: AppTheme.subtleText,
+              ),
+            ),
+            const SizedBox(height: AppTheme.spacingXs),
+            Text(
+              MoneyFormatter.formatSigned(summary.net, _settings),
+              style: TextStyle(
+                fontSize: 28,
+                fontWeight: FontWeight.bold,
+                color: netColor,
+              ),
+            ),
+            const SizedBox(height: AppTheme.spacingMd),
+            // 収入・支出を横並び
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
-                _summaryItem('収入', summary.totalIncome, Colors.blue),
-                _summaryItem('支出', summary.totalExpense, Colors.red),
-                _summaryItem(
-                  '収支',
-                  summary.net,
-                  summary.net >= 0 ? Colors.green : Colors.red,
+                Expanded(
+                  child: _summaryItem(
+                    '収入',
+                    summary.totalIncome,
+                    AppTheme.incomeColor,
+                  ),
+                ),
+                Container(
+                  width: 1,
+                  height: 36,
+                  color: Theme.of(context).colorScheme.outlineVariant,
+                ),
+                Expanded(
+                  child: _summaryItem(
+                    '支出',
+                    summary.totalExpense,
+                    AppTheme.expenseColor,
+                  ),
                 ),
               ],
             ),
-            // カテゴリ別展開（金額降順ソート）
+            // カテゴリ別内訳
             if (summary.expenseByCategory.isNotEmpty) ...[
-              const Divider(height: 24),
-              const Text(
+              const Divider(height: AppTheme.spacingLg),
+              _buildCategoryBreakdown(
                 '支出内訳',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-              ),
-              const SizedBox(height: 4),
-              ..._sortedEntries(
                 summary.expenseByCategory,
-              ).map((e) => _categoryRow(e.key, e.value)),
+                AppTheme.expenseColor,
+              ),
             ],
             if (summary.incomeByCategory.isNotEmpty) ...[
-              const Divider(height: 24),
-              const Text(
+              const Divider(height: AppTheme.spacingLg),
+              _buildCategoryBreakdown(
                 '収入内訳',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-              ),
-              const SizedBox(height: 4),
-              ..._sortedEntries(
                 summary.incomeByCategory,
-              ).map((e) => _categoryRow(e.key, e.value)),
+                AppTheme.incomeColor,
+              ),
             ],
           ],
         ),
@@ -203,23 +246,44 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// カテゴリ別Mapを金額降順でソート
-  List<MapEntry<String, int>> _sortedEntries(Map<String, int> map) {
-    final entries = map.entries.toList();
-    entries.sort((a, b) => b.value.compareTo(a.value));
-    return entries;
+  Widget _buildCategoryBreakdown(
+    String title,
+    Map<String, int> categoryMap,
+    Color color,
+  ) {
+    final sorted = categoryMap.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          title,
+          style: TextStyle(
+            fontWeight: FontWeight.w600,
+            fontSize: 13,
+            color: color,
+          ),
+        ),
+        const SizedBox(height: AppTheme.spacingXs),
+        ...sorted.map((e) => _categoryRow(e.key, e.value)),
+      ],
+    );
   }
 
   Widget _summaryItem(String label, int amount, Color color) {
     return Column(
       children: [
-        Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
-        const SizedBox(height: 4),
+        Text(
+          label,
+          style: TextStyle(fontSize: 12, color: AppTheme.subtleText),
+        ),
+        const SizedBox(height: AppTheme.spacingXs),
         Text(
           MoneyFormatter.formatSigned(amount, _settings),
           style: TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.bold,
+            fontSize: 17,
+            fontWeight: FontWeight.w600,
             color: color,
           ),
         ),
@@ -236,7 +300,7 @@ class _HomeScreenState extends State<HomeScreen> {
           Text(name, style: const TextStyle(fontSize: 13)),
           Text(
             MoneyFormatter.format(amount, _settings),
-            style: const TextStyle(fontSize: 13),
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
           ),
         ],
       ),
@@ -245,17 +309,26 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildTransactionList() {
     if (_transactions.isEmpty) {
-      return const SliverFillRemaining(child: Center(child: Text('取引がありません')));
+      return SliverFillRemaining(
+        child: EmptyStateView(
+          icon: Icons.receipt_long_outlined,
+          title: 'この月の取引はありません',
+          subtitle: '「＋」ボタンから取引を追加しましょう',
+          actionLabel: '取引を追加',
+          onAction: () => _openTransactionEdit(),
+        ),
+      );
     }
 
     return SliverList(
       delegate: SliverChildBuilderDelegate((context, index) {
         final tx = _transactions[index];
         final isExpense = tx.type == 'expense';
+        final txColor = isExpense ? AppTheme.expenseColor : AppTheme.incomeColor;
         return ListTile(
           leading: Icon(
             isExpense ? Icons.remove_circle_outline : Icons.add_circle_outline,
-            color: isExpense ? Colors.red : Colors.blue,
+            color: txColor,
           ),
           title: Text(tx.categoryName ?? '不明'),
           subtitle: Text(
@@ -264,8 +337,8 @@ class _HomeScreenState extends State<HomeScreen> {
           trailing: Text(
             MoneyFormatter.formatWithSign(tx.amount, _settings, isExpense: isExpense),
             style: TextStyle(
-              fontWeight: FontWeight.bold,
-              color: isExpense ? Colors.red : Colors.blue,
+              fontWeight: FontWeight.w600,
+              color: txColor,
             ),
           ),
           onTap: () => _openTransactionEdit(existing: tx),
@@ -295,29 +368,39 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
       body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : CustomScrollView(
+          ? const LoadingView(message: '読み込み中...')
+          : _errorMessage != null
+              ? ErrorStateView(
+                  message: _errorMessage!,
+                  onRetry: _load,
+                )
+              : CustomScrollView(
               slivers: [
                 // 年月ナビゲーション
                 SliverToBoxAdapter(
                   child: Padding(
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 8,
+                      horizontal: AppTheme.spacingMd,
+                      vertical: AppTheme.spacingSm,
                     ),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         IconButton(
                           icon: const Icon(Icons.chevron_left),
+                          tooltip: '前月',
                           onPressed: _prevMonth,
                         ),
-                        Text(
-                          '$_year年$_month月',
-                          style: Theme.of(context).textTheme.titleLarge,
+                        Semantics(
+                          header: true,
+                          child: Text(
+                            '$_year年$_month月',
+                            style: Theme.of(context).textTheme.titleLarge,
+                          ),
                         ),
                         IconButton(
                           icon: const Icon(Icons.chevron_right),
+                          tooltip: '翌月',
                           onPressed: _nextMonth,
                         ),
                       ],
@@ -329,12 +412,17 @@ class _HomeScreenState extends State<HomeScreen> {
                 // 取引一覧ヘッダー
                 const SliverToBoxAdapter(
                   child: Padding(
-                    padding: EdgeInsets.fromLTRB(16, 8, 16, 4),
+                    padding: EdgeInsets.fromLTRB(
+                      AppTheme.spacingMd,
+                      AppTheme.spacingSm,
+                      AppTheme.spacingMd,
+                      AppTheme.spacingXs,
+                    ),
                     child: Text(
                       '取引一覧',
                       style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 15,
                       ),
                     ),
                   ),

@@ -7,8 +7,10 @@ import '../models/transaction.dart' as model;
 import '../models/user_settings.dart';
 import '../repositories/category_repository.dart';
 import '../repositories/transaction_repository.dart';
+import '../theme/app_theme.dart';
 import '../utils/error_handler.dart';
 import '../utils/fx_converter.dart';
+import '../widgets/state_views.dart';
 
 /// 取引の作成/編集画面
 class TransactionEditScreen extends StatefulWidget {
@@ -226,9 +228,9 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
         ],
       ),
       body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
+          ? const LoadingView(message: 'カテゴリを読み込み中...')
           : SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(AppTheme.spacingMd),
               child: Form(
                 key: _formKey,
                 child: Column(
@@ -237,38 +239,52 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
                     // 種別切替
                     SegmentedButton<String>(
                       segments: const [
-                        ButtonSegment(value: 'expense', label: Text('支出')),
-                        ButtonSegment(value: 'income', label: Text('収入')),
+                        ButtonSegment(
+                          value: 'expense',
+                          label: Text('支出'),
+                          icon: Icon(Icons.remove_circle_outline),
+                        ),
+                        ButtonSegment(
+                          value: 'income',
+                          label: Text('収入'),
+                          icon: Icon(Icons.add_circle_outline),
+                        ),
                       ],
                       selected: {_type},
-                      onSelectionChanged: (selected) {
-                        setState(() {
-                          _type = selected.first;
-                          _selectedCategoryId = null;
-                        });
-                        _loadCategories();
-                      },
+                      onSelectionChanged: _isSaving
+                          ? null
+                          : (selected) {
+                              setState(() {
+                                _type = selected.first;
+                                _selectedCategoryId = null;
+                              });
+                              _loadCategories();
+                            },
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: AppTheme.spacingMd),
 
                     // 日付選択
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: const Icon(Icons.calendar_today),
-                      title: Text(
-                        '${_date.year}/${_date.month.toString().padLeft(2, '0')}/${_date.day.toString().padLeft(2, '0')}',
+                    InkWell(
+                      onTap: _isSaving ? null : _pickDate,
+                      borderRadius: BorderRadius.circular(AppTheme.radiusSm),
+                      child: InputDecorator(
+                        decoration: const InputDecoration(
+                          labelText: '日付',
+                          prefixIcon: Icon(Icons.calendar_today),
+                        ),
+                        child: Text(
+                          '${_date.year}/${_date.month.toString().padLeft(2, '0')}/${_date.day.toString().padLeft(2, '0')}',
+                        ),
                       ),
-                      trailing: const Icon(Icons.chevron_right),
-                      onTap: _pickDate,
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: AppTheme.spacingMd),
 
                     // カテゴリ選択
                     DropdownButtonFormField<String>(
                       initialValue: _selectedCategoryId,
                       decoration: const InputDecoration(
                         labelText: 'カテゴリ',
-                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.category_outlined),
                       ),
                       items: _categories
                           .map(
@@ -278,24 +294,26 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
                             ),
                           )
                           .toList(),
-                      onChanged: (v) => setState(() => _selectedCategoryId = v),
+                      onChanged: _isSaving
+                          ? null
+                          : (v) => setState(() => _selectedCategoryId = v),
                       validator: (v) => v == null ? 'カテゴリを選択してください' : null,
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: AppTheme.spacingMd),
 
                     // 金額
                     TextFormField(
                       controller: _amountController,
                       decoration: InputDecoration(
-                        labelText: '金額 (JPY)',
-                        border: const OutlineInputBorder(),
+                        labelText: '金額',
                         prefixText: '$_currencySymbol ',
                         helperText: widget.userSettings.displayCurrency != 'JPY'
-                            ? '※ 入力はJPY基準です'
+                            ? '※ 入力・保存はJPY基準です'
                             : null,
                       ),
                       keyboardType: TextInputType.number,
                       inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                      enabled: !_isSaving,
                       validator: (v) {
                         if (v == null || v.trim().isEmpty) {
                           return '金額を入力してください';
@@ -307,18 +325,19 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
                         return null;
                       },
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: AppTheme.spacingMd),
 
                     // メモ
                     TextFormField(
                       controller: _memoController,
                       decoration: const InputDecoration(
                         labelText: 'メモ（任意）',
-                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.notes),
                       ),
                       maxLines: 2,
+                      enabled: !_isSaving,
                     ),
-                    const SizedBox(height: 24),
+                    const SizedBox(height: AppTheme.spacingLg),
 
                     // 保存ボタン
                     FilledButton(
@@ -332,7 +351,7 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
                                 color: Colors.white,
                               ),
                             )
-                          : Text(_isEditing ? '更新' : '追加'),
+                          : Text(_isEditing ? '更新する' : '追加する'),
                     ),
                   ],
                 ),

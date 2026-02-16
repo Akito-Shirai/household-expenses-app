@@ -82,7 +82,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   controller: _emailController,
                   decoration: const InputDecoration(
                     labelText: 'メールアドレス',
-                    border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.email_outlined),
                   ),
                   keyboardType: TextInputType.emailAddress,
                   autofillHints: const [AutofillHints.email],
@@ -100,7 +100,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   controller: _passwordController,
                   decoration: const InputDecoration(
                     labelText: 'パスワード',
-                    border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.lock_outlined),
                   ),
                   obscureText: true,
                   validator: (value) {

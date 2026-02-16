@@ -7,8 +7,10 @@ import '../models/category.dart';
 import '../models/user_settings.dart';
 import '../repositories/category_repository.dart';
 import '../repositories/user_settings_repository.dart';
+import '../theme/app_theme.dart';
 import '../utils/error_handler.dart';
 import '../utils/fx_converter.dart';
+import '../widgets/state_views.dart';
 
 /// 設定画面（通貨設定 + カテゴリ管理）
 class SettingsScreen extends StatefulWidget {
@@ -30,6 +32,7 @@ class _SettingsScreenState extends State<SettingsScreen>
   String _selectedCurrency = 'JPY';
   String _selectedFxMode = 'manual';
   bool _isLoading = true;
+  String? _errorMessage;
   bool _isSaving = false;
   bool _isSavingCurrency = false;
 
@@ -48,7 +51,10 @@ class _SettingsScreenState extends State<SettingsScreen>
   }
 
   Future<void> _load() async {
-    setState(() => _isLoading = true);
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
     try {
       final expenses = await _repo.list('expense');
       final incomes = await _repo.list('income');
@@ -72,13 +78,20 @@ class _SettingsScreenState extends State<SettingsScreen>
       }
     } catch (e) {
       if (mounted) {
-        setState(() => _isLoading = false);
-        await handleError(
+        // 認証系エラー（42501）はhandleErrorで処理（セッション切れ→サインアウト導線）
+        final signedOut = await handleError(
           context: context,
           error: e,
           debugLabel: 'カテゴリ読み込みエラー',
-          userMessage: 'カテゴリの読み込みに失敗しました',
+          userMessage: 'データの読み込みに失敗しました',
         );
+        if (!mounted) return;
+        if (!signedOut) {
+          setState(() {
+            _isLoading = false;
+            _errorMessage = 'データの読み込みに失敗しました';
+          });
+        }
       }
     }
   }
@@ -130,7 +143,6 @@ class _SettingsScreenState extends State<SettingsScreen>
 
   /// 通貨設定セクション
   Widget _buildCurrencySection() {
-    // 通貨ラベルのマップ
     const currencyLabels = {
       'JPY': 'JPY (¥)',
       'USD': 'USD (\$)',
@@ -140,28 +152,43 @@ class _SettingsScreenState extends State<SettingsScreen>
     };
 
     return Card(
-      margin: const EdgeInsets.all(16),
+      margin: const EdgeInsets.symmetric(
+        horizontal: AppTheme.spacingMd,
+        vertical: AppTheme.spacingSm,
+      ),
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(AppTheme.spacingMd),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              '表示通貨設定',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            Row(
+              children: [
+                Icon(
+                  Icons.currency_exchange,
+                  size: 20,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                const SizedBox(width: AppTheme.spacingSm),
+                Text(
+                  '表示通貨設定',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                ),
+              ],
             ),
-            const SizedBox(height: 4),
-            const Text(
+            const SizedBox(height: AppTheme.spacingXs),
+            Text(
               '金額の表示通貨を変更します。保存値はJPY基準のまま維持されます。',
-              style: TextStyle(fontSize: 12, color: Colors.grey),
+              style: TextStyle(fontSize: 12, color: AppTheme.subtleText),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: AppTheme.spacingMd),
             // 通貨選択ドロップダウン
             DropdownButtonFormField<String>(
               initialValue: _selectedCurrency,
               decoration: const InputDecoration(
                 labelText: '表示通貨',
-                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.language),
               ),
               items: UserSettings.supportedCurrencies.map((c) {
                 return DropdownMenuItem(
@@ -174,7 +201,6 @@ class _SettingsScreenState extends State<SettingsScreen>
                   : (v) {
                       if (v != null) {
                         setState(() => _selectedCurrency = v);
-                        // JPYに戻す場合はレート入力をクリア
                         if (v == 'JPY') {
                           _rateController.clear();
                         }
@@ -183,7 +209,7 @@ class _SettingsScreenState extends State<SettingsScreen>
             ),
             // JPY以外の場合にモード選択とレート入力を表示
             if (_selectedCurrency != 'JPY') ...[
-              const SizedBox(height: 12),
+              const SizedBox(height: AppTheme.spacingMd),
               // FXモード選択
               SegmentedButton<String>(
                 segments: const [
@@ -206,18 +232,19 @@ class _SettingsScreenState extends State<SettingsScreen>
                         setState(() => _selectedFxMode = selected.first);
                       },
               ),
-              const SizedBox(height: 4),
-              if (_selectedFxMode == 'auto')
-                const Text(
+              if (_selectedFxMode == 'auto') ...[
+                const SizedBox(height: AppTheme.spacingXs),
+                Text(
                   '自動レート更新は今後のアップデートで対応予定です',
-                  style: TextStyle(fontSize: 11, color: Colors.orange),
+                  style: TextStyle(fontSize: 11, color: AppTheme.warningColor),
                 ),
-              const SizedBox(height: 12),
+              ],
+              const SizedBox(height: AppTheme.spacingMd),
               TextFormField(
                 controller: _rateController,
                 decoration: InputDecoration(
-                  labelText: '為替レート (1 ${MoneyFormatter.symbol(_selectedCurrency)} = ? JPY)',
-                  border: const OutlineInputBorder(),
+                  labelText: '為替レート',
+                  helperText: '1 ${MoneyFormatter.symbol(_selectedCurrency)} = ? JPY',
                   hintText: '例: 150.5',
                 ),
                 keyboardType: const TextInputType.numberWithOptions(decimal: true),
@@ -226,7 +253,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                 ],
               ),
             ],
-            const SizedBox(height: 12),
+            const SizedBox(height: AppTheme.spacingMd),
             SizedBox(
               width: double.infinity,
               child: FilledButton(
@@ -400,21 +427,12 @@ class _SettingsScreenState extends State<SettingsScreen>
         : _incomeCategories;
 
     if (categories.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text('カテゴリがありません'),
-            const SizedBox(height: 16),
-            FilledButton.icon(
-              onPressed: _isSaving
-                  ? null
-                  : () => _showCategoryDialog(type: type),
-              icon: const Icon(Icons.add),
-              label: const Text('追加'),
-            ),
-          ],
-        ),
+      return EmptyStateView(
+        icon: Icons.category_outlined,
+        title: 'カテゴリがありません',
+        subtitle: 'カテゴリを追加して取引を分類しましょう',
+        actionLabel: 'カテゴリを追加',
+        onAction: _isSaving ? null : () => _showCategoryDialog(type: type),
       );
     }
 
@@ -435,7 +453,10 @@ class _SettingsScreenState extends State<SettingsScreen>
                     : () => _showCategoryDialog(type: type, existing: cat),
               ),
               IconButton(
-                icon: const Icon(Icons.delete),
+                icon: Icon(
+                  Icons.delete_outline,
+                  color: Theme.of(context).colorScheme.error,
+                ),
                 tooltip: '削除',
                 onPressed: _isSaving ? null : () => _deleteCategory(cat),
               ),
@@ -453,25 +474,64 @@ class _SettingsScreenState extends State<SettingsScreen>
         title: const Text('設定'),
       ),
       body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : Column(
+          ? const LoadingView(message: '読み込み中...')
+          : _errorMessage != null
+              ? ErrorStateView(
+                  message: _errorMessage!,
+                  onRetry: _load,
+                )
+              : Column(
               children: [
-                // 通貨設定セクション
-                _buildCurrencySection(),
-                // カテゴリ管理タブ
-                TabBar(
-                  controller: _tabController,
-                  tabs: const [
-                    Tab(text: '支出カテゴリ'),
-                    Tab(text: '収入カテゴリ'),
-                  ],
-                ),
+                // 通貨設定セクション（スクロール可能）
                 Expanded(
-                  child: TabBarView(
-                    controller: _tabController,
-                    children: [
-                      _buildCategoryList('expense'),
-                      _buildCategoryList('income'),
+                  child: CustomScrollView(
+                    slivers: [
+                      SliverToBoxAdapter(child: _buildCurrencySection()),
+                      // カテゴリ管理セクションヘッダー
+                      SliverToBoxAdapter(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(
+                            AppTheme.spacingMd,
+                            AppTheme.spacingSm,
+                            AppTheme.spacingMd,
+                            AppTheme.spacingXs,
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(
+                                Icons.category_outlined,
+                                size: 20,
+                                color: Theme.of(context).colorScheme.primary,
+                              ),
+                              const SizedBox(width: AppTheme.spacingSm),
+                              Text(
+                                'カテゴリ管理',
+                                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      SliverToBoxAdapter(
+                        child: TabBar(
+                          controller: _tabController,
+                          tabs: const [
+                            Tab(text: '支出カテゴリ'),
+                            Tab(text: '収入カテゴリ'),
+                          ],
+                        ),
+                      ),
+                      SliverFillRemaining(
+                        child: TabBarView(
+                          controller: _tabController,
+                          children: [
+                            _buildCategoryList('expense'),
+                            _buildCategoryList('income'),
+                          ],
+                        ),
+                      ),
                     ],
                   ),
                 ),

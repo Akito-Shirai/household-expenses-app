@@ -84,6 +84,30 @@ order by tablename, policyname;
 
 > レート未設定の場合はJPY表示にフォールバックし、SnackBarで通知されます。
 
+## UI/UX改善 (Step 6)
+
+Step 6 で以下のUI改善が適用されています:
+
+### デザイン基盤
+- `lib/theme/app_theme.dart` にカラートークン・スペーシング・テーマを一元管理
+- Material 3 テーマ（`ColorScheme.fromSeed`）を全画面で共有
+
+### 状態表示の標準化
+- `lib/widgets/state_views.dart` に共通部品（LoadingView / EmptyStateView / ErrorStateView）
+- 全画面でローディング・空状態・エラー表示が統一
+
+### 画面別改善
+- **ホーム**: 収支を最上部に大きく強調、カテゴリ別内訳の色分け
+- **取引編集**: フォームにprefixIcon追加、保存中の入力無効化、バリデーション明確化
+- **設定**: 通貨設定/カテゴリ管理のセクション分離、アイコン付きヘッダー
+- **ログイン**: prefixIcon追加
+
+### 確認手順
+```bash
+flutter analyze   # 静的解析
+flutter test      # 全テスト（60テスト）
+```
+
 ## トラブルシューティング
 
 ### RLS 42501 エラー（カテゴリ追加/取引保存が失敗する）
