@@ -221,7 +221,10 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
         actions: [
           if (_isEditing)
             IconButton(
-              icon: const Icon(Icons.delete),
+              icon: Icon(
+                Icons.delete_outline,
+                color: Theme.of(context).colorScheme.error,
+              ),
               tooltip: '削除',
               onPressed: _isSaving ? null : _delete,
             ),
