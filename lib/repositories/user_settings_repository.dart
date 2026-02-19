@@ -68,6 +68,21 @@ class UserSettingsRepository {
     return UserSettings.fromJson(updated);
   }
 
+  /// 自動取得レートを更新（last_rate / last_rate_at）
+  Future<UserSettings> updateLastRate(double rate) async {
+    final userId = _client.auth.currentUser!.id;
+    final updated = await _client
+        .from('user_settings')
+        .update({
+          'last_rate': rate,
+          'last_rate_at': DateTime.now().toUtc().toIso8601String(),
+        })
+        .eq('user_id', userId)
+        .select()
+        .single();
+    return UserSettings.fromJson(updated);
+  }
+
   /// 表示通貨・レート・モードをまとめて更新
   Future<UserSettings> updateCurrencySettings({
     required String currency,

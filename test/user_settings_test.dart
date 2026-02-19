@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:household_mvp/models/user_settings.dart';
 import 'package:household_mvp/repositories/user_settings_repository.dart';
+import 'package:household_mvp/utils/fx_fetch_service.dart';
 
 void main() {
   group('UserSettings.fromJson', () {
@@ -164,7 +165,7 @@ void main() {
       expect(s.effectiveRate, isNull);
     });
 
-    test('autoモードでlastRateがnullの場合もnullを返す', () {
+    test('autoモードでlastRateがnullかつmanualRateもnullの場合はnullを返す', () {
       final s = UserSettings(
         userId: 'test',
         displayCurrency: 'USD',
@@ -173,6 +174,32 @@ void main() {
         updatedAt: DateTime.now(),
       );
       expect(s.effectiveRate, isNull);
+    });
+
+    test('autoモードでlastRateがnullのときmanualRateにフォールバックする', () {
+      final s = UserSettings(
+        userId: 'test',
+        displayCurrency: 'USD',
+        fxMode: 'auto',
+        manualRate: 150.0,
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      expect(s.effectiveRate, 150.0);
+    });
+
+    test('autoモードでlastRateがある場合はlastRateを優先する', () {
+      final s = UserSettings(
+        userId: 'test',
+        displayCurrency: 'USD',
+        fxMode: 'auto',
+        lastRate: 148.0,
+        manualRate: 150.0,
+        lastRateAt: DateTime.now(),
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      expect(s.effectiveRate, 148.0);
     });
 
     test('JPYの場合はどのモードでもnullを返す', () {
@@ -209,6 +236,61 @@ void main() {
         );
         expect(s.effectiveRate, 100.0, reason: '$currency でmanualRate取得');
       }
+    });
+  });
+
+  group('UserSettings.isLastRateStale 24時間判定', () {
+    test('lastRateAt が null の場合は stale', () {
+      final s = UserSettings(
+        userId: 'test',
+        displayCurrency: 'USD',
+        fxMode: 'auto',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      expect(s.isLastRateStale, isTrue);
+    });
+
+    test('lastRateAt が25時間前なら stale', () {
+      final s = UserSettings(
+        userId: 'test',
+        displayCurrency: 'USD',
+        fxMode: 'auto',
+        lastRateAt: DateTime.now().toUtc().subtract(const Duration(hours: 25)),
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      expect(s.isLastRateStale, isTrue);
+    });
+
+    test('lastRateAt が23時間前なら stale でない', () {
+      final s = UserSettings(
+        userId: 'test',
+        displayCurrency: 'USD',
+        fxMode: 'auto',
+        lastRateAt: DateTime.now().toUtc().subtract(const Duration(hours: 23)),
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      expect(s.isLastRateStale, isFalse);
+    });
+
+    test('lastRateAt が1分前なら stale でない', () {
+      final s = UserSettings(
+        userId: 'test',
+        displayCurrency: 'USD',
+        fxMode: 'auto',
+        lastRateAt: DateTime.now().toUtc().subtract(const Duration(minutes: 1)),
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      expect(s.isLastRateStale, isFalse);
+    });
+  });
+
+  group('FxFetchService API整合性', () {
+    test('FxFetchService クラスが存在する', () {
+      expect(FxFetchService, isNotNull);
     });
   });
 

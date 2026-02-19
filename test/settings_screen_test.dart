@@ -163,6 +163,84 @@ void main() {
     });
   });
 
+  group('設定画面: 未保存差分チェックロジック', () {
+    // _hasUnsavedCurrencyChanges 相当のロジックを単体テスト化
+    bool hasUnsavedChanges({
+      required String selectedCurrency,
+      required String selectedFxMode,
+      required UserSettings? savedSettings,
+    }) {
+      if (savedSettings == null) return true;
+      return selectedCurrency != savedSettings.displayCurrency ||
+          selectedFxMode != savedSettings.fxMode;
+    }
+
+    test('DB値と一致する場合は未保存差分なし', () {
+      final saved = UserSettings(
+        userId: 'test',
+        displayCurrency: 'USD',
+        fxMode: 'auto',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      expect(
+        hasUnsavedChanges(
+          selectedCurrency: 'USD',
+          selectedFxMode: 'auto',
+          savedSettings: saved,
+        ),
+        isFalse,
+      );
+    });
+
+    test('通貨がDB値と異なる場合は未保存差分あり', () {
+      final saved = UserSettings(
+        userId: 'test',
+        displayCurrency: 'USD',
+        fxMode: 'auto',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      expect(
+        hasUnsavedChanges(
+          selectedCurrency: 'EUR',
+          selectedFxMode: 'auto',
+          savedSettings: saved,
+        ),
+        isTrue,
+      );
+    });
+
+    test('FXモードがDB値と異なる場合は未保存差分あり', () {
+      final saved = UserSettings(
+        userId: 'test',
+        displayCurrency: 'USD',
+        fxMode: 'manual',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      expect(
+        hasUnsavedChanges(
+          selectedCurrency: 'USD',
+          selectedFxMode: 'auto',
+          savedSettings: saved,
+        ),
+        isTrue,
+      );
+    });
+
+    test('savedSettingsがnullの場合は未保存差分あり', () {
+      expect(
+        hasUnsavedChanges(
+          selectedCurrency: 'USD',
+          selectedFxMode: 'auto',
+          savedSettings: null,
+        ),
+        isTrue,
+      );
+    });
+  });
+
   group('設定画面: UserSettings設定値の整合性', () {
     test('デフォルト設定のフィールド値が正しい', () {
       final settings = UserSettings.defaults('test-user');

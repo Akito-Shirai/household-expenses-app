@@ -10,6 +10,7 @@ import '../repositories/user_settings_repository.dart';
 import '../theme/app_theme.dart';
 import '../utils/error_handler.dart';
 import '../utils/fx_converter.dart';
+import '../utils/fx_fetch_service.dart';
 import '../widgets/state_views.dart';
 
 /// 設定画面（通貨設定 + カテゴリ管理）
@@ -31,10 +32,20 @@ class _SettingsScreenState extends State<SettingsScreen>
   List<Category> _incomeCategories = [];
   String _selectedCurrency = 'JPY';
   String _selectedFxMode = 'manual';
+  UserSettings? _currentSettings;
   bool _isLoading = true;
   String? _errorMessage;
   bool _isSaving = false;
   bool _isSavingCurrency = false;
+  bool _isFetchingRate = false;
+
+  /// 通貨設定に未保存の差分があるか（通貨・FXモードがDB値と異なる）
+  bool get _hasUnsavedCurrencyChanges {
+    final saved = _currentSettings;
+    if (saved == null) return true;
+    return _selectedCurrency != saved.displayCurrency ||
+        _selectedFxMode != saved.fxMode;
+  }
 
   @override
   void initState() {
@@ -72,6 +83,7 @@ class _SettingsScreenState extends State<SettingsScreen>
             _selectedCurrency = settings.displayCurrency;
             _selectedFxMode = settings.fxMode;
             _rateController.text = settings.manualRate?.toString() ?? '';
+            _currentSettings = settings;
           }
           _isLoading = false;
         });
@@ -117,13 +129,16 @@ class _SettingsScreenState extends State<SettingsScreen>
 
     setState(() => _isSavingCurrency = true);
     try {
-      await _settingsRepo.updateCurrencySettings(
+      final updated = await _settingsRepo.updateCurrencySettings(
         currency: _selectedCurrency,
         manualRate: manualRate,
         fxMode: _selectedFxMode,
       );
       if (mounted) {
-        setState(() => _isSavingCurrency = false);
+        setState(() {
+          _isSavingCurrency = false;
+          _currentSettings = updated;
+        });
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('通貨設定を保存しました')),
         );
@@ -138,6 +153,119 @@ class _SettingsScreenState extends State<SettingsScreen>
           userMessage: '通貨設定の保存に失敗しました',
         );
       }
+    }
+  }
+
+  /// 自動モード情報パネル（最終更新時刻・適用中レート・手動更新ボタン）
+  Widget _buildAutoRateInfo() {
+    final settings = _currentSettings;
+    final lastRate = settings?.lastRate;
+    final lastRateAt = settings?.lastRateAt;
+
+    String rateText;
+    if (lastRate != null) {
+      rateText = '1 $_selectedCurrency = ${lastRate.toStringAsFixed(2)} JPY';
+    } else if (settings?.manualRate != null) {
+      rateText = '手動レートを使用中: 1 $_selectedCurrency = ${settings!.manualRate!.toStringAsFixed(2)} JPY';
+    } else {
+      rateText = 'レート未取得（JPY表示へフォールバック）';
+    }
+
+    String updatedAtText;
+    if (lastRateAt != null) {
+      final local = lastRateAt.toLocal();
+      updatedAtText =
+          '最終更新: ${local.year}/${local.month.toString().padLeft(2, '0')}/${local.day.toString().padLeft(2, '0')} '
+          '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
+    } else {
+      updatedAtText = '最終更新: 未取得';
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(AppTheme.spacingSm),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(AppTheme.radiusSm),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            rateText,
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            updatedAtText,
+            style: TextStyle(fontSize: 11, color: AppTheme.subtleText),
+          ),
+          const SizedBox(height: AppTheme.spacingSm),
+          if (_hasUnsavedCurrencyChanges) ...[
+            Text(
+              '※ 通貨設定を先に保存してください',
+              style: TextStyle(fontSize: 11, color: AppTheme.warningColor),
+            ),
+            const SizedBox(height: AppTheme.spacingXs),
+          ],
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: (_isFetchingRate ||
+                      _isSavingCurrency ||
+                      _hasUnsavedCurrencyChanges)
+                  ? null
+                  : _fetchAndSaveRate,
+              icon: _isFetchingRate
+                  ? const SizedBox(
+                      height: 14,
+                      width: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.refresh, size: 16),
+              label: Text(_isFetchingRate ? '取得中...' : '今すぐ更新'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Frankfurter APIからレートを取得してDBに保存
+  Future<void> _fetchAndSaveRate() async {
+    if (_isFetchingRate || _selectedCurrency == 'JPY') return;
+    setState(() => _isFetchingRate = true);
+    try {
+      final rate = await FxFetchService.fetchJpyRate(_selectedCurrency);
+      if (!mounted) return;
+      if (rate != null) {
+        final updated = await _settingsRepo.updateLastRate(rate);
+        if (mounted) {
+          setState(() => _currentSettings = updated);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'レートを更新しました: 1 $_selectedCurrency = ${rate.toStringAsFixed(2)} JPY',
+              ),
+            ),
+          );
+        }
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('レートの取得に失敗しました。手動レートを使用します'),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('レートの取得に失敗しました')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isFetchingRate = false);
     }
   }
 
@@ -222,7 +350,6 @@ class _SettingsScreenState extends State<SettingsScreen>
                     value: 'auto',
                     label: Text('自動'),
                     icon: Icon(Icons.sync),
-                    enabled: false,
                   ),
                 ],
                 selected: {_selectedFxMode},
@@ -233,11 +360,9 @@ class _SettingsScreenState extends State<SettingsScreen>
                       },
               ),
               if (_selectedFxMode == 'auto') ...[
-                const SizedBox(height: AppTheme.spacingXs),
-                Text(
-                  '自動レート更新は今後のアップデートで対応予定です',
-                  style: TextStyle(fontSize: 11, color: AppTheme.warningColor),
-                ),
+                const SizedBox(height: AppTheme.spacingMd),
+                // 自動モード情報パネル
+                _buildAutoRateInfo(),
               ],
               const SizedBox(height: AppTheme.spacingMd),
               TextFormField(

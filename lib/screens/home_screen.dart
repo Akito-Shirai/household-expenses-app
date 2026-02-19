@@ -8,6 +8,7 @@ import '../repositories/user_settings_repository.dart';
 import '../theme/app_theme.dart';
 import '../utils/error_handler.dart';
 import '../utils/fx_converter.dart';
+import '../utils/fx_fetch_service.dart';
 import '../widgets/state_views.dart';
 import 'settings_screen.dart';
 import 'transaction_edit_screen.dart';
@@ -90,8 +91,17 @@ class _HomeScreenState extends State<HomeScreen> {
       }
       // 設定が正常に反映された場合はフラグをリセット（次回通貨変更時に再通知可能に）
       if (settings != null &&
-          (settings.displayCurrency == 'JPY' || settings.effectiveRate != null)) {
+          (settings.displayCurrency == 'JPY' ||
+              settings.effectiveRate != null)) {
         _rateMissingNotified = false;
+      }
+      // autoモードかつlast_rateが古い場合、バックグラウンドでベストエフォート更新
+      // （一覧描画をブロックしない fire-and-forget）
+      if (settings != null &&
+          settings.fxMode == 'auto' &&
+          settings.displayCurrency != 'JPY' &&
+          settings.isLastRateStale) {
+        _refreshRateInBackground(token, settings.displayCurrency);
       }
     } catch (e) {
       if (token != _loadToken || !mounted) return;
@@ -110,6 +120,19 @@ class _HomeScreenState extends State<HomeScreen> {
           _errorMessage = 'データの読み込みに失敗しました';
         });
       }
+    }
+  }
+
+  /// バックグラウンドでレートを更新し、成功時のみ表示を差し替える
+  Future<void> _refreshRateInBackground(int token, String currency) async {
+    try {
+      final newRate = await FxFetchService.fetchJpyRate(currency);
+      if (token != _loadToken || !mounted || newRate == null) return;
+      final updated = await _settingsRepo.updateLastRate(newRate);
+      if (token != _loadToken || !mounted) return;
+      setState(() => _userSettings = updated);
+    } catch (e) {
+      debugPrint('バックグラウンドレート更新エラー: $e');
     }
   }
 

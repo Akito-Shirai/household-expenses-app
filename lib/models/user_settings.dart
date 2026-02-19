@@ -55,10 +55,24 @@ class UserSettings {
     };
   }
 
-  /// 有効なレートを返す（manualモードではmanualRate、autoではlastRate）
+  /// 有効なレートを返す
+  ///
+  /// - JPY: null（換算不要）
+  /// - manual: manualRate（未設定時は null）
+  /// - auto: last_rate → manual_rate の順でフォールバック（両方なければ null）
   double? get effectiveRate {
     if (displayCurrency == 'JPY') return null;
-    return fxMode == 'manual' ? manualRate : lastRate;
+    if (fxMode == 'manual') return manualRate;
+    return lastRate ?? manualRate;
+  }
+
+  /// last_rate_at が 24 時間以上古いかどうか（auto モード用）
+  ///
+  /// - lastRateAt が null の場合は true（未取得扱い）
+  bool get isLastRateStale {
+    if (lastRateAt == null) return true;
+    return DateTime.now().toUtc().difference(lastRateAt!.toUtc()) >
+        const Duration(hours: 24);
   }
 
   /// サポート通貨一覧
