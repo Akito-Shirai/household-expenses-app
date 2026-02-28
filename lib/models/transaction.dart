@@ -5,6 +5,8 @@ class Transaction {
   final String categoryId;
   final DateTime date;
   final int amount;
+  final int? unitPrice; // 支出時の単価（収入時はnull）
+  final int quantity; // 個数（デフォルト1）
   final String? memo;
   final String type; // 'expense' or 'income'
   final DateTime createdAt;
@@ -19,6 +21,8 @@ class Transaction {
     required this.categoryId,
     required this.date,
     required this.amount,
+    this.unitPrice,
+    this.quantity = 1,
     this.memo,
     required this.type,
     required this.createdAt,
@@ -36,6 +40,10 @@ class Transaction {
       categoryId: json['category_id'] as String,
       date: DateTime.parse(json['date'] as String),
       amount: (json['amount'] as num).toInt(),
+      unitPrice: json['unit_price'] != null
+          ? (json['unit_price'] as num).toInt()
+          : null,
+      quantity: (json['quantity'] as num?)?.toInt() ?? 1,
       memo: json['memo'] as String?,
       type: json['type'] as String,
       createdAt: DateTime.parse(json['created_at'] as String),
@@ -50,6 +58,8 @@ class Transaction {
       'category_id': categoryId,
       'date': date.toIso8601String().substring(0, 10),
       'amount': amount,
+      'unit_price': unitPrice,
+      'quantity': quantity,
       'memo': memo,
       'type': type,
     };
@@ -61,6 +71,8 @@ class Transaction {
       'category_id': categoryId,
       'date': date.toIso8601String().substring(0, 10),
       'amount': amount,
+      'unit_price': unitPrice,
+      'quantity': quantity,
       'memo': memo,
       'type': type,
     };

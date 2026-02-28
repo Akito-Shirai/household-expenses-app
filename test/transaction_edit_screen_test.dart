@@ -333,6 +333,104 @@ void main() {
     });
   });
 
+  group('取引編集: 単価バリデーションロジック', () {
+    String? validateUnitPrice(String? value) {
+      if (value == null || value.trim().isEmpty) {
+        return '単価を入力してください';
+      }
+      final price = int.tryParse(value.trim());
+      if (price == null || price < 0) {
+        return '0以上の整数を入力してください';
+      }
+      return null;
+    }
+
+    test('空入力でエラー', () {
+      expect(validateUnitPrice(''), '単価を入力してください');
+      expect(validateUnitPrice(null), '単価を入力してください');
+    });
+
+    test('0以上の整数は通過', () {
+      expect(validateUnitPrice('0'), isNull);
+      expect(validateUnitPrice('100'), isNull);
+      expect(validateUnitPrice('9999'), isNull);
+    });
+
+    test('負数はエラー', () {
+      expect(validateUnitPrice('-1'), '0以上の整数を入力してください');
+    });
+
+    test('小数・文字列はエラー', () {
+      expect(validateUnitPrice('12.5'), '0以上の整数を入力してください');
+      expect(validateUnitPrice('abc'), '0以上の整数を入力してください');
+    });
+  });
+
+  group('取引編集: 個数バリデーションロジック', () {
+    String? validateQuantity(String? value) {
+      if (value == null || value.trim().isEmpty) {
+        return '個数を入力してください';
+      }
+      final qty = int.tryParse(value.trim());
+      if (qty == null || qty < 1) {
+        return '1以上の整数を入力してください';
+      }
+      return null;
+    }
+
+    test('空入力でエラー', () {
+      expect(validateQuantity(''), '個数を入力してください');
+      expect(validateQuantity(null), '個数を入力してください');
+    });
+
+    test('1以上の整数は通過', () {
+      expect(validateQuantity('1'), isNull);
+      expect(validateQuantity('10'), isNull);
+      expect(validateQuantity('999'), isNull);
+    });
+
+    test('0はエラー', () {
+      expect(validateQuantity('0'), '1以上の整数を入力してください');
+    });
+
+    test('負数はエラー', () {
+      expect(validateQuantity('-1'), '1以上の整数を入力してください');
+    });
+
+    test('小数・文字列はエラー', () {
+      expect(validateQuantity('1.5'), '1以上の整数を入力してください');
+      expect(validateQuantity('abc'), '1以上の整数を入力してください');
+    });
+  });
+
+  group('取引編集: 合計金額の自動計算ロジック', () {
+    int calculateAmount(String unitPriceStr, String quantityStr) {
+      final unitPrice = int.tryParse(unitPriceStr.trim()) ?? 0;
+      final quantity = int.tryParse(quantityStr.trim()) ?? 1;
+      return unitPrice * quantity;
+    }
+
+    test('単価×個数で合計が計算される', () {
+      expect(calculateAmount('100', '3'), 300);
+      expect(calculateAmount('250', '2'), 500);
+      expect(calculateAmount('1000', '1'), 1000);
+    });
+
+    test('単価0の場合は合計0', () {
+      expect(calculateAmount('0', '5'), 0);
+    });
+
+    test('個数1（デフォルト）の場合は単価がそのまま合計', () {
+      expect(calculateAmount('500', '1'), 500);
+    });
+
+    test('空文字の場合のフォールバック', () {
+      expect(calculateAmount('', '1'), 0);
+      expect(calculateAmount('100', ''), 100);
+      expect(calculateAmount('', ''), 0);
+    });
+  });
+
   group('取引編集: 日付フォーマット', () {
     test('日付がゼロ埋めで表示される', () {
       final date = DateTime(2026, 2, 5);

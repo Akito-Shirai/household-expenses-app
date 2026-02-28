@@ -98,6 +98,187 @@ void main() {
     });
   });
 
+  group('Step8: 単価・個数を持つ取引のサマリー', () {
+    test('amountベースで集計される（unit_price/quantityはサマリーに影響しない）', () {
+      // サマリーはamountのみ参照する仕様
+      final transactions = [
+        Transaction(
+          id: '1',
+          userId: 'u',
+          categoryId: 'c1',
+          date: DateTime(2026, 2, 1),
+          amount: 600, // 200 * 3
+          unitPrice: 200,
+          quantity: 3,
+          type: 'expense',
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+          categoryName: '食費',
+        ),
+        Transaction(
+          id: '2',
+          userId: 'u',
+          categoryId: 'c2',
+          date: DateTime(2026, 2, 2),
+          amount: 50000,
+          type: 'income',
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+          categoryName: '給与',
+        ),
+      ];
+
+      final summary = TransactionRepository.summarize(transactions);
+
+      expect(summary.totalExpense, 600);
+      expect(summary.totalIncome, 50000);
+      expect(summary.net, 49400);
+      expect(summary.expenseByCategory['食費'], 600);
+    });
+
+    test('quantityデフォルト1で従来動作と同等', () {
+      final tx = Transaction(
+        id: '1',
+        userId: 'u',
+        categoryId: 'c1',
+        date: DateTime(2026, 2, 1),
+        amount: 500,
+        unitPrice: 500,
+        quantity: 1,
+        type: 'expense',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+        categoryName: '雑費',
+      );
+
+      final summary = TransactionRepository.summarize([tx]);
+      expect(summary.totalExpense, 500);
+      expect(summary.expenseByCategory['雑費'], 500);
+    });
+  });
+
+  group('Step8: TransactionモデルのfromJson', () {
+    test('unit_priceとquantityを正しくパースする', () {
+      final json = {
+        'id': 'test-id',
+        'user_id': 'test-user',
+        'category_id': 'test-cat',
+        'date': '2026-02-01',
+        'amount': 600,
+        'unit_price': 200,
+        'quantity': 3,
+        'memo': null,
+        'type': 'expense',
+        'created_at': '2026-02-01T00:00:00Z',
+        'updated_at': '2026-02-01T00:00:00Z',
+        'categories': {'name': '食費'},
+      };
+
+      final tx = Transaction.fromJson(json);
+      expect(tx.unitPrice, 200);
+      expect(tx.quantity, 3);
+      expect(tx.amount, 600);
+    });
+
+    test('unit_priceがnullの場合（収入など）', () {
+      final json = {
+        'id': 'test-id',
+        'user_id': 'test-user',
+        'category_id': 'test-cat',
+        'date': '2026-02-01',
+        'amount': 50000,
+        'unit_price': null,
+        'quantity': 1,
+        'memo': null,
+        'type': 'income',
+        'created_at': '2026-02-01T00:00:00Z',
+        'updated_at': '2026-02-01T00:00:00Z',
+        'categories': {'name': '給与'},
+      };
+
+      final tx = Transaction.fromJson(json);
+      expect(tx.unitPrice, isNull);
+      expect(tx.quantity, 1);
+      expect(tx.amount, 50000);
+    });
+
+    test('quantityが未定義の場合デフォルト1', () {
+      final json = {
+        'id': 'test-id',
+        'user_id': 'test-user',
+        'category_id': 'test-cat',
+        'date': '2026-02-01',
+        'amount': 1000,
+        'type': 'expense',
+        'created_at': '2026-02-01T00:00:00Z',
+        'updated_at': '2026-02-01T00:00:00Z',
+      };
+
+      final tx = Transaction.fromJson(json);
+      expect(tx.quantity, 1);
+      expect(tx.unitPrice, isNull);
+    });
+  });
+
+  group('Step8: toInsertJson / toUpdateJsonにunit_price/quantity含む', () {
+    test('支出のtoInsertJsonにunit_priceとquantityが含まれる', () {
+      final tx = Transaction(
+        id: 'id',
+        userId: 'user',
+        categoryId: 'cat',
+        date: DateTime(2026, 2, 1),
+        amount: 600,
+        unitPrice: 200,
+        quantity: 3,
+        type: 'expense',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+
+      final json = tx.toInsertJson();
+      expect(json['unit_price'], 200);
+      expect(json['quantity'], 3);
+      expect(json['amount'], 600);
+    });
+
+    test('収入のtoInsertJsonでunit_priceがnull', () {
+      final tx = Transaction(
+        id: 'id',
+        userId: 'user',
+        categoryId: 'cat',
+        date: DateTime(2026, 2, 1),
+        amount: 50000,
+        type: 'income',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+
+      final json = tx.toInsertJson();
+      expect(json['unit_price'], isNull);
+      expect(json['quantity'], 1);
+    });
+
+    test('toUpdateJsonにunit_priceとquantityが含まれる', () {
+      final tx = Transaction(
+        id: 'id',
+        userId: 'user',
+        categoryId: 'cat',
+        date: DateTime(2026, 2, 1),
+        amount: 1000,
+        unitPrice: 500,
+        quantity: 2,
+        type: 'expense',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+
+      final json = tx.toUpdateJson();
+      expect(json['unit_price'], 500);
+      expect(json['quantity'], 2);
+      expect(json['amount'], 1000);
+    });
+  });
+
   group('月境界テスト', () {
     test('listByMonthの日付フィルタ範囲が正しい', () {
       // listByMonthで使われるのと同じロジックで境界を検証

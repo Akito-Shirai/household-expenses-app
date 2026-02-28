@@ -48,19 +48,29 @@ class TransactionRepository {
   }
 
   /// 取引を作成（user_id はDB側 default auth.uid() で設定）
+  /// 支出時: amount = unitPrice * quantity で自動計算
+  /// 収入時: amount をそのまま保存（unitPrice=null, quantity=1）
   Future<Transaction> create({
     required String categoryId,
     required DateTime date,
     required int amount,
     required String type,
+    int? unitPrice,
+    int quantity = 1,
     String? memo,
   }) async {
+    // 支出時は単価×個数で合計を自動計算
+    final effectiveAmount =
+        (type == 'expense' && unitPrice != null) ? unitPrice * quantity : amount;
+
     final data = await _client
         .from('transactions')
         .insert({
           'category_id': categoryId,
           'date': date.toIso8601String().substring(0, 10),
-          'amount': amount,
+          'amount': effectiveAmount,
+          'unit_price': type == 'expense' ? unitPrice : null,
+          'quantity': quantity,
           'type': type,
           'memo': memo,
         })
@@ -70,20 +80,29 @@ class TransactionRepository {
   }
 
   /// 取引を更新（user_id条件でRLS+アプリ層の二重防御）
+  /// 支出時: amount = unitPrice * quantity で自動計算
   Future<Transaction> update({
     required String id,
     required String categoryId,
     required DateTime date,
     required int amount,
     required String type,
+    int? unitPrice,
+    int quantity = 1,
     String? memo,
   }) async {
+    // 支出時は単価×個数で合計を自動計算
+    final effectiveAmount =
+        (type == 'expense' && unitPrice != null) ? unitPrice * quantity : amount;
+
     final data = await _client
         .from('transactions')
         .update({
           'category_id': categoryId,
           'date': date.toIso8601String().substring(0, 10),
-          'amount': amount,
+          'amount': effectiveAmount,
+          'unit_price': type == 'expense' ? unitPrice : null,
+          'quantity': quantity,
           'type': type,
           'memo': memo,
         })

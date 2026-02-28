@@ -33,6 +33,8 @@ class TransactionEditScreen extends StatefulWidget {
 class _TransactionEditScreenState extends State<TransactionEditScreen> {
   final _formKey = GlobalKey<FormState>();
   final _amountController = TextEditingController();
+  final _unitPriceController = TextEditingController();
+  final _quantityController = TextEditingController();
   final _memoController = TextEditingController();
   final _catRepo = CategoryRepository(supabase);
   final _txRepo = TransactionRepository(supabase);
@@ -45,6 +47,14 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
   bool _isSaving = false;
 
   bool get _isEditing => widget.existing != null;
+  bool get _isExpense => _type == 'expense';
+
+  /// 支出の合計金額（単価 × 個数）
+  int get _calculatedAmount {
+    final unitPrice = int.tryParse(_unitPriceController.text.trim()) ?? 0;
+    final quantity = int.tryParse(_quantityController.text.trim()) ?? 1;
+    return unitPrice * quantity;
+  }
 
   /// 通貨記号（設定通貨に連動）
   String get _currencySymbol =>
@@ -58,8 +68,20 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
       _type = tx.type;
       _date = tx.date;
       _selectedCategoryId = tx.categoryId;
-      _amountController.text = tx.amount.toString();
       _memoController.text = tx.memo ?? '';
+
+      if (tx.type == 'expense') {
+        // 支出: 単価・個数を復元（unit_price未設定の既存データはamountを初期単価として補完）
+        _unitPriceController.text =
+            (tx.unitPrice ?? tx.amount).toString();
+        _quantityController.text = tx.quantity.toString();
+      } else {
+        // 収入: 従来の金額入力
+        _amountController.text = tx.amount.toString();
+      }
+    } else {
+      // 新規作成: 個数のデフォルト値を1に設定
+      _quantityController.text = '1';
     }
     _loadCategories();
   }
@@ -67,6 +89,8 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
   @override
   void dispose() {
     _amountController.dispose();
+    _unitPriceController.dispose();
+    _quantityController.dispose();
     _memoController.dispose();
     super.dispose();
   }
@@ -134,26 +158,58 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
     setState(() => _isSaving = true);
 
     try {
-      final amount = int.parse(_amountController.text.trim());
       final memo = _memoController.text.trim();
 
-      if (_isEditing) {
-        await _txRepo.update(
-          id: widget.existing!.id,
-          categoryId: _selectedCategoryId!,
-          date: _date,
-          amount: amount,
-          type: _type,
-          memo: memo.isEmpty ? null : memo,
-        );
+      if (_isExpense) {
+        // 支出: 単価×個数で保存
+        final unitPrice = int.parse(_unitPriceController.text.trim());
+        final quantity = int.parse(_quantityController.text.trim());
+        final amount = unitPrice * quantity;
+
+        if (_isEditing) {
+          await _txRepo.update(
+            id: widget.existing!.id,
+            categoryId: _selectedCategoryId!,
+            date: _date,
+            amount: amount,
+            type: _type,
+            unitPrice: unitPrice,
+            quantity: quantity,
+            memo: memo.isEmpty ? null : memo,
+          );
+        } else {
+          await _txRepo.create(
+            categoryId: _selectedCategoryId!,
+            date: _date,
+            amount: amount,
+            type: _type,
+            unitPrice: unitPrice,
+            quantity: quantity,
+            memo: memo.isEmpty ? null : memo,
+          );
+        }
       } else {
-        await _txRepo.create(
-          categoryId: _selectedCategoryId!,
-          date: _date,
-          amount: amount,
-          type: _type,
-          memo: memo.isEmpty ? null : memo,
-        );
+        // 収入: 従来の金額入力
+        final amount = int.parse(_amountController.text.trim());
+
+        if (_isEditing) {
+          await _txRepo.update(
+            id: widget.existing!.id,
+            categoryId: _selectedCategoryId!,
+            date: _date,
+            amount: amount,
+            type: _type,
+            memo: memo.isEmpty ? null : memo,
+          );
+        } else {
+          await _txRepo.create(
+            categoryId: _selectedCategoryId!,
+            date: _date,
+            amount: amount,
+            type: _type,
+            memo: memo.isEmpty ? null : memo,
+          );
+        }
       }
 
       if (mounted) Navigator.pop(context, true);
@@ -211,6 +267,111 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
         );
       }
     }
+  }
+
+  /// 支出用の金額入力ウィジェット（単価・個数・合計自動計算）
+  Widget _buildExpenseAmountFields() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // 単価
+        TextFormField(
+          controller: _unitPriceController,
+          decoration: InputDecoration(
+            labelText: '単価',
+            prefixText: '$_currencySymbol ',
+            helperText: widget.userSettings.displayCurrency != 'JPY'
+                ? '※ 入力・保存はJPY基準です'
+                : null,
+          ),
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          enabled: !_isSaving,
+          onChanged: (_) => setState(() {}),
+          validator: (v) {
+            if (v == null || v.trim().isEmpty) {
+              return '単価を入力してください';
+            }
+            final price = int.tryParse(v.trim());
+            if (price == null || price < 0) {
+              return '0以上の整数を入力してください';
+            }
+            return null;
+          },
+        ),
+        const SizedBox(height: AppTheme.spacingMd),
+
+        // 個数
+        TextFormField(
+          controller: _quantityController,
+          decoration: const InputDecoration(
+            labelText: '個数',
+            prefixIcon: Icon(Icons.inventory_2_outlined),
+          ),
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          enabled: !_isSaving,
+          onChanged: (_) => setState(() {}),
+          validator: (v) {
+            if (v == null || v.trim().isEmpty) {
+              return '個数を入力してください';
+            }
+            final qty = int.tryParse(v.trim());
+            if (qty == null || qty < 1) {
+              return '1以上の整数を入力してください';
+            }
+            return null;
+          },
+        ),
+        const SizedBox(height: AppTheme.spacingSm),
+
+        // 合計金額（読み取り専用）
+        InputDecorator(
+          decoration: InputDecoration(
+            labelText: '合計金額',
+            prefixText: '$_currencySymbol ',
+            filled: true,
+            fillColor: Theme.of(context)
+                .colorScheme
+                .surfaceContainerHighest
+                .withAlpha(128),
+          ),
+          child: Text(
+            _calculatedAmount.toString(),
+            style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                  fontWeight: FontWeight.bold,
+                ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 収入用の金額入力ウィジェット（従来の金額直接入力）
+  Widget _buildIncomeAmountField() {
+    return TextFormField(
+      controller: _amountController,
+      decoration: InputDecoration(
+        labelText: '金額',
+        prefixText: '$_currencySymbol ',
+        helperText: widget.userSettings.displayCurrency != 'JPY'
+            ? '※ 入力・保存はJPY基準です'
+            : null,
+      ),
+      keyboardType: TextInputType.number,
+      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+      enabled: !_isSaving,
+      validator: (v) {
+        if (v == null || v.trim().isEmpty) {
+          return '金額を入力してください';
+        }
+        final amount = int.tryParse(v.trim());
+        if (amount == null || amount < 0) {
+          return '0以上の整数を入力してください';
+        }
+        return null;
+      },
+    );
   }
 
   @override
@@ -304,30 +465,11 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
                     ),
                     const SizedBox(height: AppTheme.spacingMd),
 
-                    // 金額
-                    TextFormField(
-                      controller: _amountController,
-                      decoration: InputDecoration(
-                        labelText: '金額',
-                        prefixText: '$_currencySymbol ',
-                        helperText: widget.userSettings.displayCurrency != 'JPY'
-                            ? '※ 入力・保存はJPY基準です'
-                            : null,
-                      ),
-                      keyboardType: TextInputType.number,
-                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                      enabled: !_isSaving,
-                      validator: (v) {
-                        if (v == null || v.trim().isEmpty) {
-                          return '金額を入力してください';
-                        }
-                        final amount = int.tryParse(v.trim());
-                        if (amount == null || amount < 0) {
-                          return '0以上の整数を入力してください';
-                        }
-                        return null;
-                      },
-                    ),
+                    // 金額入力（支出/収入で切替）
+                    if (_isExpense)
+                      _buildExpenseAmountFields()
+                    else
+                      _buildIncomeAmountField(),
                     const SizedBox(height: AppTheme.spacingMd),
 
                     // メモ
