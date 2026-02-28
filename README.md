@@ -38,11 +38,19 @@ dart format .
 
 ## Supabase migration 適用
 
-`supabase/migrations/` 配下のSQLを Supabase SQL Editor で順番に実行してください。
+以下のSQLを Supabase SQL Editor で順番に実行してください。
 
-1. `20260215000000_create_categories_and_transactions.sql` — テーブル定義 + RLS + トリガー
-2. `20260216000000_alter_user_id_defaults_and_composite_fk.sql` — 既存環境への差分適用（default / 複合FK）
-3. `20260216100000_create_user_settings.sql` — ユーザー設定テーブル（表示通貨・為替レート）
+> **配置場所**: migration ファイルは2箇所に分かれています。
+> - リポジトリルート: `supabase/migrations/` — テーブル定義・スキーマ変更・トリガー
+> - アプリ配下: `household-expenses-app/supabase/migrations/` — アプリ固有の設定テーブル
+
+| # | ファイル | 配置場所 | 内容 |
+|---|---------|---------|------|
+| 1 | `20260215000000_create_categories_and_transactions.sql` | ルート | テーブル定義 + RLS + トリガー |
+| 2 | `20260216000000_alter_user_id_defaults_and_composite_fk.sql` | ルート | 既存環境への差分適用（default / 複合FK） |
+| 3 | `20260216100000_create_user_settings.sql` | アプリ配下 | ユーザー設定テーブル（表示通貨・為替レート） |
+| 4 | `20260228000000_add_unit_price_and_quantity.sql` | ルート | 単価・個数カラム追加 + 既存データバックフィル |
+| 5 | `20260228100000_seed_default_categories.sql` | ルート | 初期カテゴリ自動投入（トリガー + 既存ユーザーバックフィル） |
 
 ### migration 適用確認
 
@@ -145,6 +153,32 @@ flutter test      # 全テスト（104テスト）
 flutter analyze   # 静的解析
 flutter test      # 全テスト（145テスト）
 ```
+
+## 初期カテゴリ自動設定 (Step 9)
+
+ユーザー作成時にデフォルトカテゴリが自動で作成されます。
+
+### 初期カテゴリ一覧
+- **支出（6件）**: 食費、水道光熱費、家賃、交通費、通信費、医療費
+- **収入（2件）**: 給与、賞与
+
+### 仕様
+- 新規ユーザー登録時に `auth.users` トリガーで自動投入
+- 既存ユーザーにはマイグレーション適用時にバックフィル（欠落分のみ補完）
+- 初期カテゴリは通常カテゴリと同じ扱い（編集・削除可能）
+- 同名・同タイプのカテゴリが既に存在する場合はスキップ（重複防止）
+
+### セキュリティ
+- `seed_default_categories()` / `on_auth_user_created()` は `REVOKE EXECUTE` で `anon` / `authenticated` からの直接呼び出しを禁止
+- トリガー経由（`SECURITY DEFINER`）でのみ実行される
+
+### 確認手順
+```bash
+flutter analyze   # 静的解析
+flutter test      # 全テスト（157テスト）
+```
+
+DB側の検証手順（トリガー発火・冪等性・バックフィル）は `docs/tasks/step9_default_categories.md` の「SQL検証手順」セクションを参照してください。
 
 ## トラブルシューティング
 
