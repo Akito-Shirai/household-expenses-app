@@ -10,6 +10,7 @@ import '../utils/error_handler.dart';
 import '../utils/fx_converter.dart';
 import '../utils/fx_fetch_service.dart';
 import '../widgets/state_views.dart';
+import 'analytics_screen.dart';
 import 'settings_screen.dart';
 import 'transaction_edit_screen.dart';
 
@@ -376,6 +377,18 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text('家計簿'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.bar_chart_outlined),
+            tooltip: '分析',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => AnalyticsScreen(userSettings: _settings),
+                ),
+              );
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.settings),
             tooltip: '設定',

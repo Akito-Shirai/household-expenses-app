@@ -47,6 +47,22 @@ class TransactionRepository {
     return data.map((json) => Transaction.fromJson(json)).toList();
   }
 
+  /// 指定日付範囲の取引一覧を取得（カテゴリ名JOIN、日付降順）
+  /// [startDate] 以上 [endDate] 未満のレコードを返す
+  Future<List<Transaction>> listByDateRange(
+    DateTime startDate,
+    DateTime endDate,
+  ) async {
+    final data = await _client
+        .from('transactions')
+        .select('*, categories(name)')
+        .gte('date', startDate.toIso8601String().substring(0, 10))
+        .lt('date', endDate.toIso8601String().substring(0, 10))
+        .order('date', ascending: false);
+
+    return data.map((json) => Transaction.fromJson(json)).toList();
+  }
+
   /// 取引を作成（user_id はDB側 default auth.uid() で設定）
   /// 支出時: amount = unitPrice * quantity で自動計算
   /// 収入時: amount をそのまま保存（unitPrice=null, quantity=1）
