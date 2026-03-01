@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -10,6 +9,7 @@ import '../models/transaction.dart' as model;
 import '../models/user_settings.dart';
 import '../repositories/category_repository.dart';
 import '../repositories/transaction_repository.dart';
+import '../services/ocr_engine/ocr_engine.dart';
 import '../services/receipt_ocr_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/error_handler.dart';
@@ -95,6 +95,7 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
 
   @override
   void dispose() {
+    _ocrEngine?.dispose();
     _amountController.dispose();
     _unitPriceController.dispose();
     _quantityController.dispose();
@@ -278,13 +279,16 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
 
   // ─── レシートOCR ───
 
-  /// OCRボタンを表示すべきか（iOS/Androidのみ）
-  bool get _isOcrSupported {
-    if (kIsWeb) return false;
-    final platform = defaultTargetPlatform;
-    return platform == TargetPlatform.iOS ||
-        platform == TargetPlatform.android;
+  OcrEngine? _ocrEngine;
+
+  /// OCRエンジンを取得（遅延初期化）
+  OcrEngine get _engine {
+    _ocrEngine ??= createOcrEngine();
+    return _ocrEngine!;
   }
+
+  /// OCRボタンを表示すべきか
+  bool get _isOcrSupported => _engine.isAvailable;
 
   /// レシートOCRフローを開始
   Future<void> _startOcr() async {
@@ -323,12 +327,15 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
         break;
     }
 
-    final imageFile = pickResult.file!;
+    final imageBytes = pickResult.imageBytes!;
 
-    // OCR処理
+    // OCR処理（Engine経由）
     setState(() => _isOcrProcessing = true);
     try {
-      final result = await ReceiptOcrService.processImage(imageFile);
+      final result = await ReceiptOcrService.processImageBytes(
+        imageBytes,
+        _engine,
+      );
 
       if (!mounted) return;
       setState(() => _isOcrProcessing = false);
@@ -628,7 +635,7 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
                     ),
                     const SizedBox(height: AppTheme.spacingMd),
 
-                    // レシート読み取りボタン（支出モード & iOS/Androidのみ）
+                    // レシート読み取りボタン（支出モード & OCR対応プラットフォーム）
                     if (_isExpense && _isOcrSupported) ...[
                       OutlinedButton.icon(
                         onPressed: (_isSaving || _isOcrProcessing)
