@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:household_mvp/models/ocr_token.dart';
 import 'package:household_mvp/models/receipt_ocr_result.dart';
 import 'package:household_mvp/services/receipt_ocr_service.dart';
 
@@ -319,6 +320,243 @@ void main() {
       // isDailyLimitReached が false であることのみ確認
       // （実際のカウントは processImage 経由で増加）
       expect(ReceiptOcrService.dailyLimit, 30);
+    });
+  });
+
+  // ─── Step13: 除外強化テスト ───
+
+  group('除外強化', () {
+    test('和暦日付行はスキップされる', () {
+      final lines = ['令和8年3月1日', '合計 ¥500'];
+      final result = ReceiptOcrService.extractTotal(lines);
+      expect(result, isNotNull);
+      expect(result!.value, 500);
+    });
+
+    test('10桁以上の連番のみの行はスキップされる', () {
+      final lines = ['1234567890', '合計 ¥500'];
+      final result = ReceiptOcrService.extractTotal(lines);
+      expect(result, isNotNull);
+      expect(result!.value, 500);
+    });
+
+    test('連番を含むが金額記号がある行はスキップされない', () {
+      final lines = ['合計 ¥1234567890'];
+      // 100万超なので除外される
+      final result = ReceiptOcrService.extractTotal(lines);
+      expect(result, isNull);
+    });
+
+    test('平成日付行はスキップされる', () {
+      final lines = ['平成31年4月1日', '合計 ¥800'];
+      final result = ReceiptOcrService.extractTotal(lines);
+      expect(result, isNotNull);
+      expect(result!.value, 800);
+    });
+  });
+
+  // ─── Step13: bbox版 店名抽出テスト ───
+
+  group('bbox版 店名抽出', () {
+    test('上位25%の大きいフォントが優先される', () {
+      final tokens = [
+        // 店名（上部、大きいフォント）
+        OcrToken(
+          text: 'テスト店舗',
+          bbox: const OcrBoundingBox(x: 10, y: 10, width: 200, height: 40),
+        ),
+        // 住所（上部、小さいフォント）
+        OcrToken(
+          text: '渋谷区',
+          bbox: const OcrBoundingBox(x: 10, y: 60, width: 150, height: 20),
+        ),
+        // 合計（下部）
+        OcrToken(
+          text: '合計 ¥500',
+          bbox: const OcrBoundingBox(x: 10, y: 300, width: 150, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractMerchantFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 'テスト店舗');
+    });
+
+    test('除外キーワードを含むトークンはスキップされる', () {
+      final tokens = [
+        OcrToken(
+          text: 'TEL 03-1234-5678',
+          bbox: const OcrBoundingBox(x: 10, y: 10, width: 200, height: 40),
+        ),
+        OcrToken(
+          text: 'テスト店',
+          bbox: const OcrBoundingBox(x: 10, y: 60, width: 150, height: 30),
+        ),
+        OcrToken(
+          text: '合計 ¥500',
+          bbox: const OcrBoundingBox(x: 10, y: 300, width: 150, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractMerchantFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 'テスト店');
+    });
+
+    test('下部（25%以下）のトークンのみの場合はnull', () {
+      final tokens = [
+        OcrToken(
+          text: 'テスト店',
+          bbox: const OcrBoundingBox(x: 10, y: 350, width: 150, height: 30),
+        ),
+        OcrToken(
+          text: '合計 ¥500',
+          bbox: const OcrBoundingBox(x: 10, y: 380, width: 150, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractMerchantFromTokens(tokens);
+      // 上位25%にトークンがない場合はnull
+      expect(result, isNull);
+    });
+
+    test('店舗系キーワード+大きいフォントが優先される', () {
+      final tokens = [
+        // 同じ位置だが、ドラッグストアの方がフォントが大きい
+        OcrToken(
+          text: 'お知らせ',
+          bbox: const OcrBoundingBox(x: 10, y: 10, width: 200, height: 20),
+        ),
+        OcrToken(
+          text: 'ドラッグストア',
+          bbox: const OcrBoundingBox(x: 10, y: 40, width: 200, height: 40),
+        ),
+        OcrToken(
+          text: '合計 ¥500',
+          bbox: const OcrBoundingBox(x: 10, y: 300, width: 150, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractMerchantFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 'ドラッグストア');
+    });
+  });
+
+  // ─── Step13: bbox版 合計金額抽出テスト ───
+
+  group('bbox版 合計金額抽出', () {
+    test('同一テキスト内のキーワード+金額が最優先される', () {
+      final tokens = [
+        OcrToken(
+          text: 'おにぎり ¥150',
+          bbox: const OcrBoundingBox(x: 10, y: 100, width: 200, height: 20),
+        ),
+        OcrToken(
+          text: '合計 ¥334',
+          bbox: const OcrBoundingBox(x: 10, y: 200, width: 200, height: 20),
+        ),
+        OcrToken(
+          text: 'お釣り ¥166',
+          bbox: const OcrBoundingBox(x: 10, y: 250, width: 200, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractTotalFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 334);
+    });
+
+    test('キーワードと金額が別トークンで同一行にある場合', () {
+      final tokens = [
+        OcrToken(
+          text: '合計',
+          bbox: const OcrBoundingBox(x: 10, y: 200, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '¥500',
+          bbox: const OcrBoundingBox(x: 100, y: 200, width: 80, height: 20),
+        ),
+        OcrToken(
+          text: '小計 ¥400',
+          bbox: const OcrBoundingBox(x: 10, y: 150, width: 200, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractTotalFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 500);
+    });
+
+    test('除外キーワード行はスキップされる', () {
+      final tokens = [
+        OcrToken(
+          text: '合計 ¥500',
+          bbox: const OcrBoundingBox(x: 10, y: 200, width: 200, height: 20),
+        ),
+        OcrToken(
+          text: 'お釣り ¥1,000',
+          bbox: const OcrBoundingBox(x: 10, y: 250, width: 200, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractTotalFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 500);
+    });
+
+    test('和暦日付トークンはスキップされる', () {
+      final tokens = [
+        OcrToken(
+          text: '令和8年3月1日',
+          bbox: const OcrBoundingBox(x: 10, y: 50, width: 200, height: 20),
+        ),
+        OcrToken(
+          text: '合計 ¥700',
+          bbox: const OcrBoundingBox(x: 10, y: 200, width: 200, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractTotalFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 700);
+    });
+  });
+
+  // ─── Step13: extractFromTokens 統合テスト ───
+
+  group('extractFromTokens 統合テスト', () {
+    test('bbox付きトークンから店名と金額が抽出される', () {
+      final tokens = [
+        OcrToken(
+          text: 'セブン-イレブン',
+          bbox: const OcrBoundingBox(x: 10, y: 10, width: 200, height: 40),
+        ),
+        OcrToken(
+          text: 'TEL 03-1234-5678',
+          bbox: const OcrBoundingBox(x: 10, y: 60, width: 200, height: 20),
+        ),
+        OcrToken(
+          text: '合計 ¥334',
+          bbox: const OcrBoundingBox(x: 10, y: 200, width: 200, height: 20),
+        ),
+        OcrToken(
+          text: 'お釣り ¥166',
+          bbox: const OcrBoundingBox(x: 10, y: 250, width: 200, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.merchantName, 'セブン-イレブン');
+      expect(result.totalAmount, 334);
+      expect(result.isEmpty, isFalse);
+    });
+
+    test('bboxなしトークンはテキストベースフォールバックを使用', () {
+      final tokens = [
+        const OcrToken(text: 'テスト店'),
+        const OcrToken(text: '合計 ¥1,000'),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.merchantName, 'テスト店');
+      expect(result.totalAmount, 1000);
+    });
+
+    test('空トークンリストは空結果', () {
+      final result = ReceiptOcrService.extractFromTokens([]);
+      expect(result.isEmpty, isTrue);
+      expect(result.confidence, 0.0);
     });
   });
 }

@@ -1,14 +1,23 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../theme/app_theme.dart';
 
 /// カメラ/ライブラリ選択ボトムシート
+///
+/// Web ではカメラ導線を表示せず、写真選択のみを提供する。
 class ImageSourceDialog extends StatelessWidget {
   const ImageSourceDialog({super.key});
 
   /// ボトムシートを表示し、選択された ImageSource を返す
+  ///
+  /// Web の場合はボトムシートを表示せず、直接 gallery を返す。
   static Future<ImageSource?> show(BuildContext context) {
+    if (kIsWeb) {
+      // Web: カメラ不可のため直接 gallery を返す
+      return Future.value(ImageSource.gallery);
+    }
     return showModalBottomSheet<ImageSource>(
       context: context,
       shape: const RoundedRectangleBorder(

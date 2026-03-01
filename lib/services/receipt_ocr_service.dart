@@ -1,11 +1,10 @@
-import 'dart:io';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../models/ocr_token.dart';
 import '../models/receipt_ocr_result.dart';
+import 'ocr_engine/ocr_engine.dart';
 
 /// スコア付き抽出結果（内部使用）
 class ScoredResult<T> {
@@ -29,14 +28,19 @@ enum PickImageStatus {
   failed,
 }
 
-/// 画像取得の結果
+/// 画像取得の結果（プラットフォーム非依存: Uint8List）
 class PickImageResult {
   final PickImageStatus status;
-  final File? file;
-  const PickImageResult(this.status, [this.file]);
+  final Uint8List? imageBytes;
+  const PickImageResult(this.status, [this.imageBytes]);
 }
 
 /// レシートOCRサービス（オンデバイス処理、画像非送信）
+///
+/// 3層構成:
+///   - OcrEngine（インフラ層）: プラットフォーム別のOCR処理
+///   - 抽出ロジック（純粋関数）: テキスト/トークンからの情報抽出
+///   - ReceiptOcrService（オーケストレーション）: 画像取得→OCR→抽出の統合
 class ReceiptOcrService {
   const ReceiptOcrService._();
 
@@ -44,7 +48,7 @@ class ReceiptOcrService {
   static const int _maxImageDimension = 2048;
 
   /// OCR処理のタイムアウト（秒）
-  static const int _timeoutSeconds = 10;
+  static const int timeoutSeconds = 12;
 
   /// 店名候補の検索対象行数（上部N行）
   static const int _merchantSearchLines = 5;
@@ -81,6 +85,13 @@ class ReceiptOcrService {
   /// 日付パターン（金額誤認防止）
   static final RegExp _datePattern =
       RegExp(r'\d{4}[/\-\.]\d{1,2}[/\-\.]\d{1,2}');
+
+  /// 和暦日付パターン（令和/平成 + 数字）
+  static final RegExp _warekiPattern =
+      RegExp(r'(令和|平成|昭和)\s*\d{1,2}年');
+
+  /// 連番パターン（10桁以上の数字列 → レシート番号等）
+  static final RegExp _serialNumberPattern = RegExp(r'\d{10,}');
 
   // ─── 1日上限チェック ───
 
@@ -120,10 +131,11 @@ class ReceiptOcrService {
       if (xFile == null) {
         return const PickImageResult(PickImageStatus.canceled);
       }
-      return PickImageResult(PickImageStatus.success, File(xFile.path));
+      // プラットフォーム非依存: XFile からバイト列を読み取る
+      final bytes = await xFile.readAsBytes();
+      return PickImageResult(PickImageStatus.success, bytes);
     } on PlatformException catch (e) {
       debugPrint('ReceiptOcrService: 画像取得エラー: $e');
-      // image_picker は権限拒否時に PlatformException を投げる
       if (e.code == 'camera_access_denied' ||
           e.code == 'photo_access_denied') {
         return const PickImageResult(PickImageStatus.permissionDenied);
@@ -135,52 +147,76 @@ class ReceiptOcrService {
     }
   }
 
-  // ─── OCR実行 ───
+  // ─── OCR実行（Engine経由） ───
 
-  /// 画像ファイルからテキストを認識しOCR結果を抽出
-  /// 処理完了後、一時画像ファイルを削除する
-  static Future<ReceiptOcrResult?> processImage(File imageFile) async {
+  /// 画像バイト列からOCRを実行し結果を抽出
+  ///
+  /// [engine] はプラットフォーム別の OcrEngine 実装。
+  /// 一時ファイルの管理は Engine 側で行う。
+  static Future<ReceiptOcrResult?> processImageBytes(
+    Uint8List imageBytes,
+    OcrEngine engine,
+  ) async {
     _incrementCount();
-    final textRecognizer = TextRecognizer(
-      script: TextRecognitionScript.japanese,
-    );
     try {
-      final inputImage = InputImage.fromFile(imageFile);
-      final recognizedText = await textRecognizer
-          .processImage(inputImage)
-          .timeout(Duration(seconds: _timeoutSeconds));
+      final tokens = await engine
+          .recognizeFromBytes(imageBytes)
+          .timeout(Duration(seconds: timeoutSeconds));
 
-      if (recognizedText.text.isEmpty) {
-        debugPrint('ReceiptOcrService: OCRテキスト空');
+      if (tokens.isEmpty) {
+        debugPrint('ReceiptOcrService: OCRトークン空');
         return null;
       }
 
-      return extractFromText(recognizedText.text);
+      // トークンからテキストを結合して抽出（bbox版は Step13-D で追加）
+      return extractFromTokens(tokens);
     } catch (e) {
       debugPrint('ReceiptOcrService: OCR処理エラー: $e');
       return null;
-    } finally {
-      textRecognizer.close();
-      // H-3: 一時画像を削除（プライバシー保護）
-      _deleteTempImage(imageFile);
-    }
-  }
-
-  /// 一時画像ファイルを安全に削除
-  static void _deleteTempImage(File file) {
-    try {
-      if (file.existsSync()) {
-        file.deleteSync();
-        debugPrint('ReceiptOcrService: 一時画像を削除しました');
-      }
-    } catch (e) {
-      debugPrint('ReceiptOcrService: 一時画像削除エラー: $e');
     }
   }
 
   // ─── 抽出ロジック（純粋関数、テスト可能） ───
 
-  /// OCRテキストから店名・合計金額を抽出
+  /// OcrToken リストから店名・合計金額を抽出
+  ///
+  /// bbox データがある場合は位置・サイズ情報を活用して精度を向上。
+  /// bbox がない場合はテキストベースのフォールバックを使用。
+  @visibleForTesting
+  static ReceiptOcrResult extractFromTokens(List<OcrToken> tokens) {
+    final lines = tokens
+        .map((t) => t.text.trim())
+        .where((t) => t.isNotEmpty)
+        .toList();
+
+    if (lines.isEmpty) {
+      return const ReceiptOcrResult(confidence: 0.0);
+    }
+
+    // bbox が利用可能か判定
+    final hasBbox = tokens.any((t) => t.bbox != null);
+
+    final ScoredResult<String>? merchantResult;
+    final ScoredResult<int>? totalResult;
+
+    if (hasBbox) {
+      merchantResult = extractMerchantFromTokens(tokens);
+      totalResult = extractTotalFromTokens(tokens);
+    } else {
+      merchantResult = extractMerchant(lines);
+      totalResult = extractTotal(lines);
+    }
+
+    final confidence = calculateConfidence(merchantResult, totalResult);
+
+    return ReceiptOcrResult(
+      merchantName: merchantResult?.value,
+      totalAmount: totalResult?.value,
+      confidence: confidence,
+    );
+  }
+
+  /// OCRテキストから店名・合計金額を抽出（後方互換）
   @visibleForTesting
   static ReceiptOcrResult extractFromText(String ocrText) {
     final lines = ocrText
@@ -270,10 +306,29 @@ class ReceiptOcrService {
       // 除外キーワードを含む行はスキップ
       if (totalExcludeKeywords.any((kw) => line.contains(kw))) continue;
 
-      // 日付のみの行はスキップ（金額との誤認防止）
+      // 日付行はスキップ（金額との誤認防止）
       if (_datePattern.hasMatch(line) &&
           !totalPriorityKeywords.any((kw) => line.contains(kw))) {
         continue;
+      }
+
+      // 和暦日付行はスキップ
+      if (_warekiPattern.hasMatch(line) &&
+          !totalPriorityKeywords.any((kw) => line.contains(kw))) {
+        continue;
+      }
+
+      // 連番（10桁以上）のみの行はスキップ（レシート番号等）
+      if (_serialNumberPattern.hasMatch(line) &&
+          !line.contains('¥') &&
+          !line.contains('￥') &&
+          !line.contains('円')) {
+        // 金額記号がなく連番が含まれる → 注文番号等の可能性
+        final serialMatch = _serialNumberPattern.firstMatch(line);
+        if (serialMatch != null &&
+            serialMatch.group(0)!.length == line.replaceAll(RegExp(r'\s'), '').length) {
+          continue;
+        }
       }
 
       // 優先キーワードの有無
@@ -332,6 +387,196 @@ class ReceiptOcrService {
     }
 
     return confidence.clamp(0, 1).toDouble();
+  }
+
+  // ─── bbox版 店名抽出 ───
+
+  /// bbox 情報を活用した店名抽出
+  ///
+  /// - 上位25%の位置にあるトークンを対象
+  /// - bbox.height（フォントサイズ代理）が大きいトークンを優先
+  @visibleForTesting
+  static ScoredResult<String>? extractMerchantFromTokens(List<OcrToken> tokens) {
+    final validTokens = tokens
+        .where((t) => t.text.trim().isNotEmpty && t.bbox != null)
+        .toList();
+    if (validTokens.isEmpty) return null;
+
+    // 画像全体の高さを推定（最下部トークンの y + height）
+    double maxY = 0;
+    for (final t in validTokens) {
+      final bottom = t.bbox!.y + t.bbox!.height;
+      if (bottom > maxY) {
+        maxY = bottom;
+      }
+    }
+    if (maxY <= 0) return null;
+
+    // 上位25%のトークンのみ対象
+    final upperThreshold = maxY * 0.25;
+    final upperTokens = validTokens
+        .where((t) => t.bbox!.y < upperThreshold)
+        .toList();
+    if (upperTokens.isEmpty) return null;
+
+    // 最大フォントサイズ（bbox.height）を取得
+    double maxHeight = 0;
+    for (final t in upperTokens) {
+      if (t.bbox!.height > maxHeight) {
+        maxHeight = t.bbox!.height;
+      }
+    }
+
+    double bestScore = 0;
+    String? bestCandidate;
+
+    for (final token in upperTokens) {
+      final text = token.text.trim();
+
+      // 基本フィルタ
+      if (text.length < 2 || text.length > 30) continue;
+      if (merchantExcludeKeywords.any((kw) => text.contains(kw))) continue;
+
+      final symbolCount =
+          text.runes.where((r) => !_isJapaneseOrAlphanumeric(r)).length;
+      if (symbolCount > text.runes.length / 2) continue;
+
+      double score = 0;
+
+      // 位置スコア: 上にあるほど高い
+      score += (1.0 - token.bbox!.y / upperThreshold).clamp(0.0, 1.0);
+
+      // フォントサイズスコア: 大きいほど高い（店名は大きい文字で書かれることが多い）
+      if (maxHeight > 0) {
+        score += (token.bbox!.height / maxHeight) * 0.5;
+      }
+
+      // 日本語ボーナス
+      if (text.runes.any((r) => _isJapanese(r))) {
+        score += 0.3;
+      }
+
+      // 店舗系キーワードボーナス
+      if (RegExp(r'(店|ストア|マート|スーパー|コンビニ|薬局|ドラッグ)')
+          .hasMatch(text)) {
+        score += 0.2;
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestCandidate = text;
+      }
+    }
+
+    if (bestCandidate == null) return null;
+    return ScoredResult(bestCandidate, bestScore);
+  }
+
+  // ─── bbox版 合計金額抽出 ───
+
+  /// bbox 情報を活用した合計金額抽出
+  ///
+  /// - 優先キーワードと同一行（近い Y 座標）の金額を最優先
+  /// - 右側近傍の金額を第2優先
+  @visibleForTesting
+  static ScoredResult<int>? extractTotalFromTokens(List<OcrToken> tokens) {
+    final amountRegex =
+        RegExp(r'[¥￥]\s*([0-9,]+)|([0-9,]+)\s*円|([0-9,]{3,})');
+
+    // Y座標の近さで「同一行」を判定するための閾値
+    // 各トークンの高さの平均を基準にする
+    final bboxTokens = tokens.where((t) => t.bbox != null).toList();
+    if (bboxTokens.isEmpty) {
+      // bbox なし → テキストベースにフォールバック
+      final lines = tokens.map((t) => t.text.trim()).where((t) => t.isNotEmpty).toList();
+      return extractTotal(lines);
+    }
+
+    double avgHeight = 0;
+    for (final t in bboxTokens) {
+      avgHeight += t.bbox!.height;
+    }
+    avgHeight /= bboxTokens.length;
+    // 同一行判定: Y座標の差が平均高さの1.5倍以内
+    final sameLineThreshold = avgHeight * 1.5;
+
+    // 優先キーワードを含むトークンを検索
+    final keywordTokens = bboxTokens.where((t) =>
+        totalPriorityKeywords.any((kw) => t.text.contains(kw)) &&
+        !totalExcludeKeywords.any((kw) => t.text.contains(kw))).toList();
+
+    double bestScore = -1;
+    int? bestAmount;
+
+    for (final token in bboxTokens) {
+      final text = token.text.trim();
+
+      // 除外チェック
+      if (totalExcludeKeywords.any((kw) => text.contains(kw))) continue;
+      if (_datePattern.hasMatch(text) &&
+          !totalPriorityKeywords.any((kw) => text.contains(kw))) {
+        continue;
+      }
+      if (_warekiPattern.hasMatch(text)) continue;
+      if (_serialNumberPattern.hasMatch(text) &&
+          !text.contains('¥') && !text.contains('￥') && !text.contains('円')) {
+        final serialMatch = _serialNumberPattern.firstMatch(text);
+        if (serialMatch != null &&
+            serialMatch.group(0)!.length == text.replaceAll(RegExp(r'\s'), '').length) {
+          continue;
+        }
+      }
+
+      // 金額を抽出
+      final matches = amountRegex.allMatches(text);
+      for (final match in matches) {
+        final amountStr =
+            (match.group(1) ?? match.group(2) ?? match.group(3))
+                ?.replaceAll(',', '');
+        if (amountStr == null || amountStr.isEmpty) continue;
+
+        final amount = int.tryParse(amountStr);
+        if (amount == null || amount <= 0 || amount > 1000000) continue;
+
+        double score = 0;
+
+        // 同一テキスト内に優先キーワードがある場合
+        if (totalPriorityKeywords.any((kw) => text.contains(kw))) {
+          score += 2.0;
+        }
+
+        // 近傍の優先キーワードトークンとの位置関係
+        if (token.bbox != null) {
+          for (final kwToken in keywordTokens) {
+            final yDiff = (token.bbox!.y - kwToken.bbox!.y).abs();
+            if (yDiff < sameLineThreshold) {
+              // 同一行のキーワード近傍
+              score += 1.5;
+              // キーワードの右側にある金額をさらに優先
+              if (token.bbox!.x > kwToken.bbox!.x) {
+                score += 0.3;
+              }
+              break;
+            }
+          }
+        }
+
+        // 文書下部ボーナス
+        final tokenIndex = bboxTokens.indexOf(token);
+        score += tokenIndex / bboxTokens.length * 0.5;
+
+        // 金額規模ボーナス
+        score += (amount / 100000).clamp(0, 0.3);
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestAmount = amount;
+        }
+      }
+    }
+
+    if (bestAmount == null) return null;
+    return ScoredResult(bestAmount, bestScore);
   }
 
   // ─── ユーティリティ ───
