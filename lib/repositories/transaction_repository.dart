@@ -42,6 +42,7 @@ class TransactionRepository {
         .select('*, categories(name)')
         .gte('date', startDate.toIso8601String().substring(0, 10))
         .lt('date', endDate.toIso8601String().substring(0, 10))
+        .isFilter('expired_at', null)
         .order('date', ascending: false);
 
     return data.map((json) => Transaction.fromJson(json)).toList();
@@ -58,6 +59,7 @@ class TransactionRepository {
         .select('*, categories(name)')
         .gte('date', startDate.toIso8601String().substring(0, 10))
         .lt('date', endDate.toIso8601String().substring(0, 10))
+        .isFilter('expired_at', null)
         .order('date', ascending: false);
 
     return data.map((json) => Transaction.fromJson(json)).toList();
