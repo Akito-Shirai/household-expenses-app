@@ -1,15 +1,21 @@
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../main.dart';
 import '../models/category.dart';
+import '../models/receipt_ocr_result.dart';
 import '../models/transaction.dart' as model;
 import '../models/user_settings.dart';
 import '../repositories/category_repository.dart';
 import '../repositories/transaction_repository.dart';
+import '../services/receipt_ocr_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/error_handler.dart';
 import '../utils/fx_converter.dart';
+import '../widgets/image_source_dialog.dart';
+import '../widgets/receipt_ocr_result_dialog.dart';
 import '../widgets/state_views.dart';
 
 /// 取引の作成/編集画面
@@ -45,6 +51,7 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
   List<Category> _categories = [];
   bool _isLoading = false;
   bool _isSaving = false;
+  bool _isOcrProcessing = false;
 
   bool get _isEditing => widget.existing != null;
   bool get _isExpense => _type == 'expense';
@@ -269,6 +276,162 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
     }
   }
 
+  // ─── レシートOCR ───
+
+  /// OCRボタンを表示すべきか（iOS/Androidのみ）
+  bool get _isOcrSupported {
+    if (kIsWeb) return false;
+    final platform = defaultTargetPlatform;
+    return platform == TargetPlatform.iOS ||
+        platform == TargetPlatform.android;
+  }
+
+  /// レシートOCRフローを開始
+  Future<void> _startOcr() async {
+    // 1日上限チェック
+    if (ReceiptOcrService.isDailyLimitReached) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('本日のレシート読み取り上限に達しました')),
+        );
+      }
+      return;
+    }
+
+    // 画像ソース選択
+    final source = await ImageSourceDialog.show(context);
+    if (source == null || !mounted) return;
+
+    // 画像取得（結果型で理由を判別）
+    final pickResult = await ReceiptOcrService.pickImage(source);
+    if (!mounted) return;
+
+    switch (pickResult.status) {
+      case PickImageStatus.canceled:
+        // ユーザーキャンセル: 何もしない
+        return;
+      case PickImageStatus.permissionDenied:
+        // H-1: 権限拒否時にダイアログで説明
+        await _showPermissionDeniedDialog();
+        return;
+      case PickImageStatus.failed:
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('画像の取得に失敗しました。手入力で続けてください。')),
+        );
+        return;
+      case PickImageStatus.success:
+        break;
+    }
+
+    final imageFile = pickResult.file!;
+
+    // OCR処理
+    setState(() => _isOcrProcessing = true);
+    try {
+      final result = await ReceiptOcrService.processImage(imageFile);
+
+      if (!mounted) return;
+      setState(() => _isOcrProcessing = false);
+
+      if (result == null || result.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('レシートを読み取れませんでした。手入力してください。')),
+        );
+        return;
+      }
+
+      // 結果確認ダイアログ
+      final apply = await ReceiptOcrResultDialog.show(context, result);
+      if (apply == true && mounted) {
+        await _applyOcrResult(result);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isOcrProcessing = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('読み取り中にエラーが発生しました')),
+        );
+      }
+    }
+  }
+
+  /// H-1: 権限拒否時のダイアログ（設定アプリ導線付き）
+  Future<void> _showPermissionDeniedDialog() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('カメラ/写真へのアクセス'),
+        content: const Text(
+          'レシート読み取りにはカメラまたは写真ライブラリへのアクセスが必要です。\n'
+          '端末の「設定」からアクセスを許可してください。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('手入力で続ける'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(context);
+              openAppSettings();
+            },
+            child: const Text('設定を開く'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// OCR結果をフォームに反映（H-2: 既存値がある場合は確認）
+  Future<void> _applyOcrResult(ReceiptOcrResult result) async {
+    // H-2: 既存入力との競合チェック
+    final hasExistingPrice = _unitPriceController.text.trim().isNotEmpty;
+    final hasExistingQuantity =
+        _quantityController.text.trim().isNotEmpty &&
+        _quantityController.text.trim() != '1';
+    final hasExistingMemo = _memoController.text.trim().isNotEmpty;
+
+    if (hasExistingPrice || hasExistingQuantity || hasExistingMemo) {
+      final overwrite = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('入力済みの値を上書き'),
+          content: const Text(
+            '既に入力されている値があります。\nレシートの読み取り結果で上書きしますか？',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('キャンセル'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('上書きする'),
+            ),
+          ],
+        ),
+      );
+      if (overwrite != true || !mounted) return;
+    }
+
+    setState(() {
+      // 金額を単価に反映
+      if (result.totalAmount != null) {
+        _unitPriceController.text = result.totalAmount.toString();
+        // 個数は既存値を維持（上書きしない）
+      }
+      // 店名をメモに反映
+      if (result.merchantName != null) {
+        final currentMemo = _memoController.text.trim();
+        if (currentMemo.isEmpty) {
+          _memoController.text = result.merchantName!;
+        } else {
+          _memoController.text = '${result.merchantName!}\n$currentMemo';
+        }
+      }
+    });
+  }
+
   /// 支出用の金額入力ウィジェット（単価・個数・合計自動計算）
   Widget _buildExpenseAmountFields() {
     return Column(
@@ -464,6 +627,28 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
                       validator: (v) => v == null ? 'カテゴリを選択してください' : null,
                     ),
                     const SizedBox(height: AppTheme.spacingMd),
+
+                    // レシート読み取りボタン（支出モード & iOS/Androidのみ）
+                    if (_isExpense && _isOcrSupported) ...[
+                      OutlinedButton.icon(
+                        onPressed: (_isSaving || _isOcrProcessing)
+                            ? null
+                            : _startOcr,
+                        icon: _isOcrProcessing
+                            ? const SizedBox(
+                                height: 18,
+                                width: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.document_scanner_outlined),
+                        label: Text(
+                          _isOcrProcessing ? '読み取り中...' : 'レシート読み取り',
+                        ),
+                      ),
+                      const SizedBox(height: AppTheme.spacingMd),
+                    ],
 
                     // 金額入力（支出/収入で切替）
                     if (_isExpense)
