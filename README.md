@@ -51,6 +51,8 @@ dart format .
 | 3 | `20260216100000_create_user_settings.sql` | アプリ配下 | ユーザー設定テーブル（表示通貨・為替レート） |
 | 4 | `20260228000000_add_unit_price_and_quantity.sql` | ルート | 単価・個数カラム追加 + 既存データバックフィル |
 | 5 | `20260228100000_seed_default_categories.sql` | ルート | 初期カテゴリ自動投入（トリガー + 既存ユーザーバックフィル） |
+| 6 | `20260301000000_add_retention_policy.sql` | ルート | データ保持ポリシー（retention_config + expired_at + retention_logs） |
+| 7 | `20260301100000_add_retention_functions.sql` | ルート | 保持ポリシーSQL関数群（dry_run / expire / purge / monthly_run） |
 
 ### migration 適用確認
 
@@ -203,6 +205,100 @@ DB側の検証手順（トリガー発火・冪等性・バックフィル）は
 flutter analyze   # 静的解析
 flutter test      # 全テスト
 ```
+
+## データ保持ポリシー (Step 11)
+
+Supabase無料枠での長期運用に向け、取引データの保持年数を管理し、2段階削除（期限切れ化 → 猶予後の物理削除）を導入しています。
+
+### ポリシー概要
+- **保持期間**: Free運用 5年 / Paid運用 10年（`retention_config` テーブルで管理）
+- **対象**: `transactions` テーブルのみ（カテゴリ等のマスタは対象外）
+- **2段階削除**:
+  1. 期限切れ化: `expired_at` にタイムスタンプを設定（通常画面から非表示になるが、データは残存）
+  2. 物理削除: 猶予期間（デフォルト90日）経過後に DELETE
+- **物理削除済みデータは自動復元しない**（必要ならバックアップ復元で対応）
+
+### 運用手順（Supabase SQL Editor で実行）
+
+```sql
+-- 1. 現在の設定確認
+SELECT * FROM retention_config;
+
+-- 2. Dry-run（対象件数の事前確認、データ変更なし）
+--    expire/purge/rehydrate の各対象件数を返す
+SELECT * FROM retention_dry_run();
+
+-- 3. 期限切れ化の実行（内部で rehydrate を先に実行）
+SELECT * FROM retention_expire();
+
+-- 4. 物理削除の実行（猶予期間超過分のみ）
+SELECT * FROM retention_purge();
+
+-- 5. 実行ログの確認
+SELECT * FROM retention_logs ORDER BY executed_at DESC;
+
+-- 一括実行（rehydrate → dry_run → expire → purge を順番に実行）
+SELECT * FROM retention_run_monthly();
+```
+
+### 保持年数の変更
+
+```sql
+-- Free → Paid 切替時
+UPDATE retention_config SET retention_years = 10 WHERE id = 1;
+
+-- 変更後の影響確認（rehydrate_target_count で復帰対象件数を確認）
+SELECT * FROM retention_dry_run();
+
+-- 既に期限切れ化されたデータのうち、新しいポリシーで保持対象になるデータを復帰
+SELECT * FROM retention_rehydrate();
+```
+
+> **注意**: 保持年数を延長した場合、`retention_rehydrate()` を実行することで、
+> 既に期限切れ化されたが新ポリシーでは保持期間内のデータが自動的に復帰します。
+> `retention_expire()` や `retention_run_monthly()` は内部で自動的に `rehydrate` を実行するため、
+> 通常の月次運用では明示的な呼び出しは不要です。
+
+### 月次定期実行
+
+#### Supabase Pro 以上（pg_cron 利用可能）
+
+```sql
+-- 毎月1日 AM3:00 (UTC) に自動実行
+SELECT cron.schedule(
+  'retention-monthly',
+  '0 3 1 * *',
+  $$SELECT public.retention_run_monthly()$$
+);
+
+-- ジョブの確認
+SELECT * FROM cron.job;
+
+-- 実行履歴の確認
+SELECT * FROM cron.job_run_details ORDER BY start_time DESC LIMIT 10;
+
+-- ジョブの削除
+SELECT cron.unschedule('retention-monthly');
+```
+
+#### Supabase Free（手動実行）
+
+毎月1回、SQL Editor から以下を実行してください:
+
+```sql
+SELECT * FROM retention_run_monthly();
+SELECT * FROM retention_logs ORDER BY executed_at DESC LIMIT 5;
+```
+
+#### 実行失敗時
+
+`retention_logs` の `success = false` のレコードを確認し、`error_message` を参照してください。
+再実行は安全です（冪等性あり）。
+
+### セキュリティ
+- 全関数は `SECURITY DEFINER` + `REVOKE EXECUTE` + `SET search_path` で一般ユーザーからの直接呼び出しを遮断
+- `retention_config` は認証済みユーザーの SELECT のみ許可
+- `retention_logs` は RLS ポリシーなし（service_role のみ操作可）
 
 ## トラブルシューティング
 

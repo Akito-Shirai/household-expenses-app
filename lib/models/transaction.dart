@@ -9,6 +9,7 @@ class Transaction {
   final int quantity; // 個数（デフォルト1）
   final String? memo;
   final String type; // 'expense' or 'income'
+  final DateTime? expiredAt; // データ保持ポリシーによる期限切れ日時
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -25,6 +26,7 @@ class Transaction {
     this.quantity = 1,
     this.memo,
     required this.type,
+    this.expiredAt,
     required this.createdAt,
     required this.updatedAt,
     this.categoryName,
@@ -46,6 +48,9 @@ class Transaction {
       quantity: (json['quantity'] as num?)?.toInt() ?? 1,
       memo: json['memo'] as String?,
       type: json['type'] as String,
+      expiredAt: json['expired_at'] != null
+          ? DateTime.parse(json['expired_at'] as String)
+          : null,
       createdAt: DateTime.parse(json['created_at'] as String),
       updatedAt: DateTime.parse(json['updated_at'] as String),
       categoryName: categories?['name'] as String?,
