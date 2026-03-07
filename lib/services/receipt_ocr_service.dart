@@ -23,6 +23,11 @@ enum PickImageStatus {
   permissionDenied,
 
   /// ブラウザ制約でファイル選択を開始できない
+  ///
+  /// 主な原因:
+  /// - user activation 制約: ファイル選択がユーザー操作と同一イベントループ内でない
+  /// - PlatformException（権限以外）: ブラウザ固有のファイル入力制約
+  /// - その他 Web 固有の例外
   browserBlocked,
 
   /// 画像の読み込み失敗（ファイル破損等）
@@ -74,7 +79,8 @@ extension PickImageStatusMessage on PickImageStatus {
         PickImageStatus.canceled => '',
         PickImageStatus.permissionDenied => 'カメラ/写真ライブラリへのアクセスが必要です。',
         PickImageStatus.browserBlocked =>
-          'ブラウザの制約でファイル選択を開始できませんでした。再試行してください。',
+          'ブラウザの制約でファイル選択を開始できませんでした。'
+          'もう一度押すか、別のブラウザで試してください。手入力でも続けられます。',
         PickImageStatus.fileReadError =>
           '画像の読み込みに失敗しました。別の画像で再試行してください。',
         PickImageStatus.unsupportedFormat =>

@@ -29,6 +29,23 @@ class _MockImagePickAdapter implements ImagePickAdapter {
   void dispose() {}
 }
 
+/// 呼び出しごとに異なる結果を返すモック画像アダプタ
+class _SequentialMockImagePickAdapter implements ImagePickAdapter {
+  final List<PickImageResult> results;
+  int _callCount = 0;
+  _SequentialMockImagePickAdapter(this.results);
+
+  @override
+  Future<PickImageResult> pickImage(ImageSource source) async {
+    final result = results[_callCount % results.length];
+    _callCount++;
+    return result;
+  }
+
+  @override
+  void dispose() {}
+}
+
 /// テスト用モックOCRエンジン（常に利用可能、空トークンを返す）
 class _MockOcrEngine implements OcrEngine {
   @override
@@ -677,6 +694,93 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('再試行'), findsOneWidget);
+    });
+
+    testWidgets('連続browserBlocked: 2回目で強調メッセージに切り替わる',
+        (tester) async {
+      final adapter = _SequentialMockImagePickAdapter([
+        const PickImageResult(PickImageStatus.browserBlocked),
+        const PickImageResult(PickImageStatus.browserBlocked),
+      ]);
+      await tester.pumpWidget(MaterialApp(
+        home: TransactionEditScreen(
+          userSettings: UserSettings.defaults('test-user'),
+          imagePickAdapter: adapter,
+          ocrEngine: _MockOcrEngine(),
+          imageSourceSelector: (_) async => ImageSource.gallery,
+        ),
+      ));
+      await waitForFormReady(tester);
+
+      // 1回目: 通常の browserBlocked メッセージ
+      await tapOcrAndSettle(tester);
+      expect(
+        find.text(PickImageStatus.browserBlocked.defaultMessage),
+        findsOneWidget,
+      );
+
+      // SnackBar をクリアして2回目
+      final messenger = tester.state<ScaffoldMessengerState>(
+        find.byType(ScaffoldMessenger),
+      );
+      messenger.clearSnackBars();
+      await tester.pump();
+
+      // 2回目: 強調メッセージ
+      await tapOcrAndSettle(tester);
+      expect(
+        find.text(
+          'ブラウザの制約により画像選択が繰り返し失敗しています。'
+          '別のブラウザで試すか、手入力で続けてください。',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('fileTooLarge後のbrowserBlocked: 連続カウントされない（通常文言）',
+        (tester) async {
+      final adapter = _SequentialMockImagePickAdapter([
+        const PickImageResult(PickImageStatus.fileTooLarge),
+        const PickImageResult(PickImageStatus.browserBlocked),
+      ]);
+      await tester.pumpWidget(MaterialApp(
+        home: TransactionEditScreen(
+          userSettings: UserSettings.defaults('test-user'),
+          imagePickAdapter: adapter,
+          ocrEngine: _MockOcrEngine(),
+          imageSourceSelector: (_) async => ImageSource.gallery,
+        ),
+      ));
+      await waitForFormReady(tester);
+
+      // 1回目: fileTooLarge
+      await tapOcrAndSettle(tester);
+      expect(
+        find.text(PickImageStatus.fileTooLarge.defaultMessage),
+        findsOneWidget,
+      );
+
+      // SnackBar をクリアして2回目
+      final messenger = tester.state<ScaffoldMessengerState>(
+        find.byType(ScaffoldMessenger),
+      );
+      messenger.clearSnackBars();
+      await tester.pump();
+
+      // 2回目: browserBlocked だが初回なので通常メッセージ
+      await tapOcrAndSettle(tester);
+      expect(
+        find.text(PickImageStatus.browserBlocked.defaultMessage),
+        findsOneWidget,
+      );
+      // 強調メッセージは表示されない
+      expect(
+        find.text(
+          'ブラウザの制約により画像選択が繰り返し失敗しています。'
+          '別のブラウザで試すか、手入力で続けてください。',
+        ),
+        findsNothing,
+      );
     });
 
     testWidgets('permissionDenied: 「手入力で続ける」タップでダイアログが閉じる',

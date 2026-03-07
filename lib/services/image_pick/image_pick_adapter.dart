@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
@@ -27,6 +28,12 @@ const int maxPickFileSizeBytes = 10 * 1024 * 1024;
 /// ファイル選択時の例外を [PickImageStatus] に変換
 ///
 /// Web/Mobile 共通で使用。テスト可能な純粋関数。
+/// [isWeb] が true の場合:
+///   - [PlatformException]（権限以外）→ [PickImageStatus.browserBlocked]
+///     ブラウザの user activation 制約やファイル入力制約が原因と推定
+///   - その他の例外 → [PickImageStatus.unknown]
+///     プラグイン内部エラーや予期しない例外
+/// ログには例外の型とコードを出力し、運用時の原因切り分けを支援する。
 PickImageResult classifyPickException(Object error, {bool isWeb = false}) {
   if (error is PlatformException) {
     if (error.code == 'camera_access_denied' ||
@@ -34,16 +41,24 @@ PickImageResult classifyPickException(Object error, {bool isWeb = false}) {
       return const PickImageResult(PickImageStatus.permissionDenied);
     }
     if (isWeb) {
+      debugPrint(
+        'classifyPickException: Web PlatformException '
+        'code=${error.code} message=${error.message}',
+      );
       return PickImageResult(
         PickImageStatus.browserBlocked,
         errorDetail: PickImageStatus.browserBlocked.defaultMessage,
       );
     }
   }
+  // Web の非 PlatformException は内部エラーとして unknown に分類
   if (isWeb) {
+    debugPrint(
+      'classifyPickException: Web内部例外 type=${error.runtimeType} $error',
+    );
     return PickImageResult(
-      PickImageStatus.browserBlocked,
-      errorDetail: PickImageStatus.browserBlocked.defaultMessage,
+      PickImageStatus.unknown,
+      errorDetail: PickImageStatus.unknown.defaultMessage,
     );
   }
   return PickImageResult(

@@ -665,7 +665,8 @@ void main() {
     test('browserBlocked の PickImageResult が正しく構成される', () {
       const result = PickImageResult(
         PickImageStatus.browserBlocked,
-        errorDetail: 'ブラウザの制約でファイル選択を開始できませんでした。再試行してください。',
+        errorDetail: 'ブラウザの制約でファイル選択を開始できませんでした。'
+            'もう一度押すか、別のブラウザで試してください。手入力でも続けられます。',
       );
       expect(result.status, PickImageStatus.browserBlocked);
       expect(result.errorDetail, contains('ブラウザ'));
@@ -722,7 +723,7 @@ void main() {
     test('browserBlocked はデフォルトメッセージを返す', () {
       const result = PickImageResult(PickImageStatus.browserBlocked);
       expect(result.displayMessage, contains('ブラウザ'));
-      expect(result.displayMessage, contains('再試行'));
+      expect(result.displayMessage, contains('手入力'));
     });
 
     test('fileReadError はデフォルトメッセージを返す', () {
@@ -809,7 +810,8 @@ void main() {
     test('browserBlocked の文言がPRD定義と一致', () {
       expect(
         PickImageStatus.browserBlocked.defaultMessage,
-        'ブラウザの制約でファイル選択を開始できませんでした。再試行してください。',
+        'ブラウザの制約でファイル選択を開始できませんでした。'
+        'もう一度押すか、別のブラウザで試してください。手入力でも続けられます。',
       );
     });
 
@@ -898,12 +900,13 @@ void main() {
       expect(result.errorDetail, contains('ブラウザ'));
     });
 
-    test('Web + 一般例外 → browserBlocked', () {
+    test('Web + 一般例外 → unknown（内部エラーとして分類）', () {
       final result = classifyPickException(
         Exception('test error'),
         isWeb: true,
       );
-      expect(result.status, PickImageStatus.browserBlocked);
+      expect(result.status, PickImageStatus.unknown);
+      expect(result.errorDetail, contains('手入力'));
     });
 
     test('Mobile + 一般例外 → unknown', () {
