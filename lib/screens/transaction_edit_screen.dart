@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../main.dart';
@@ -9,6 +10,7 @@ import '../models/transaction.dart' as model;
 import '../models/user_settings.dart';
 import '../repositories/category_repository.dart';
 import '../repositories/transaction_repository.dart';
+import '../services/image_pick/image_pick_adapter.dart';
 import '../services/ocr_engine/ocr_engine.dart';
 import '../services/receipt_ocr_service.dart';
 import '../theme/app_theme.dart';
@@ -26,10 +28,25 @@ class TransactionEditScreen extends StatefulWidget {
   /// 通貨設定（表示通貨の記号表示に使用）
   final UserSettings userSettings;
 
+  /// テスト用: 画像取得アダプタの注入
+  @visibleForTesting
+  final ImagePickAdapter? imagePickAdapter;
+
+  /// テスト用: OCRエンジンの注入
+  @visibleForTesting
+  final OcrEngine? ocrEngine;
+
+  /// テスト用: 画像ソース選択の注入（ImageSourceDialog.show を差し替え可能にする）
+  @visibleForTesting
+  final Future<ImageSource?> Function(BuildContext)? imageSourceSelector;
+
   const TransactionEditScreen({
     super.key,
     this.existing,
     required this.userSettings,
+    this.imagePickAdapter,
+    this.ocrEngine,
+    this.imageSourceSelector,
   });
 
   @override
@@ -96,6 +113,7 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
   @override
   void dispose() {
     _ocrEngine?.dispose();
+    _imagePickAdapter?.dispose();
     _amountController.dispose();
     _unitPriceController.dispose();
     _quantityController.dispose();
@@ -280,11 +298,18 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
   // ─── レシートOCR ───
 
   OcrEngine? _ocrEngine;
+  ImagePickAdapter? _imagePickAdapter;
 
-  /// OCRエンジンを取得（遅延初期化）
+  /// OCRエンジンを取得（DI or 遅延初期化）
   OcrEngine get _engine {
-    _ocrEngine ??= createOcrEngine();
+    _ocrEngine ??= widget.ocrEngine ?? createOcrEngine();
     return _ocrEngine!;
+  }
+
+  /// 画像取得アダプタを取得（DI or 遅延初期化）
+  ImagePickAdapter get _picker {
+    _imagePickAdapter ??= widget.imagePickAdapter ?? createImagePickAdapter();
+    return _imagePickAdapter!;
   }
 
   /// OCRボタンを表示すべきか
@@ -302,29 +327,38 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
       return;
     }
 
-    // 画像ソース選択
-    final source = await ImageSourceDialog.show(context);
+    // 画像ソース選択（テスト時はDI経由で差し替え可能）
+    final source = widget.imageSourceSelector != null
+        ? await widget.imageSourceSelector!(context)
+        : await ImageSourceDialog.show(context);
     if (source == null || !mounted) return;
 
-    // 画像取得（結果型で理由を判別）
-    final pickResult = await ReceiptOcrService.pickImage(source);
+    // 画像取得（アダプタ経由で理由を判別）
+    final pickResult = await _picker.pickImage(source);
     if (!mounted) return;
 
-    switch (pickResult.status) {
-      case PickImageStatus.canceled:
-        // ユーザーキャンセル: 何もしない
-        return;
-      case PickImageStatus.permissionDenied:
-        // H-1: 権限拒否時にダイアログで説明
-        await _showPermissionDeniedDialog();
-        return;
-      case PickImageStatus.failed:
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('画像の取得に失敗しました。手入力で続けてください。')),
-        );
-        return;
-      case PickImageStatus.success:
-        break;
+    // 失敗種別を記録（匿名メトリクス、PII なし）
+    ReceiptOcrService.recordPickFailure(pickResult.status);
+
+    // 失敗時のUI分岐
+    if (pickResult.status == PickImageStatus.canceled) return;
+
+    if (pickResult.status == PickImageStatus.permissionDenied) {
+      await _showPermissionDeniedDialog();
+      return;
+    }
+
+    if (pickResult.status != PickImageStatus.success) {
+      final message = pickResult.displayMessage!;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(message),
+          action: pickResult.shouldShowRetry
+              ? SnackBarAction(label: '再試行', onPressed: _startOcr)
+              : null,
+        ),
+      );
+      return;
     }
 
     final imageBytes = pickResult.imageBytes!;
