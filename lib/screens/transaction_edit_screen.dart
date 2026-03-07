@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
@@ -69,6 +70,7 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
   bool _isLoading = false;
   bool _isSaving = false;
   bool _isOcrProcessing = false;
+  int _consecutiveBrowserBlockedCount = 0;
 
   bool get _isEditing => widget.existing != null;
   bool get _isExpense => _type == 'expense';
@@ -327,11 +329,19 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
       return;
     }
 
-    // 画像ソース選択（テスト時はDI経由で差し替え可能）
-    final source = widget.imageSourceSelector != null
-        ? await widget.imageSourceSelector!(context)
-        : await ImageSourceDialog.show(context);
-    if (source == null || !mounted) return;
+    // 画像ソース選択
+    // Web: ブラウザの user activation 制約回避のためダイアログを省略し gallery 固定
+    // Mobile: カメラ/ギャラリー選択ダイアログを表示
+    final ImageSource source;
+    if (kIsWeb && widget.imageSourceSelector == null) {
+      source = ImageSource.gallery;
+    } else {
+      final selected = widget.imageSourceSelector != null
+          ? await widget.imageSourceSelector!(context)
+          : await ImageSourceDialog.show(context);
+      if (selected == null || !mounted) return;
+      source = selected;
+    }
 
     // 画像取得（アダプタ経由で理由を判別）
     final pickResult = await _picker.pickImage(source);
@@ -341,15 +351,30 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
     ReceiptOcrService.recordPickFailure(pickResult.status);
 
     // 失敗時のUI分岐
-    if (pickResult.status == PickImageStatus.canceled) return;
+    if (pickResult.status == PickImageStatus.canceled) {
+      _consecutiveBrowserBlockedCount = 0;
+      return;
+    }
 
     if (pickResult.status == PickImageStatus.permissionDenied) {
+      _consecutiveBrowserBlockedCount = 0;
       await _showPermissionDeniedDialog();
       return;
     }
 
     if (pickResult.status != PickImageStatus.success) {
-      final message = pickResult.displayMessage!;
+      // browserBlocked のみ連続カウント、それ以外はリセット
+      if (pickResult.status == PickImageStatus.browserBlocked) {
+        _consecutiveBrowserBlockedCount++;
+      } else {
+        _consecutiveBrowserBlockedCount = 0;
+      }
+      // 連続 browserBlocked 時はブラウザ制約の可能性を強調
+      final message = (_consecutiveBrowserBlockedCount >= 2 &&
+              pickResult.status == PickImageStatus.browserBlocked)
+          ? 'ブラウザの制約により画像選択が繰り返し失敗しています。'
+              '別のブラウザで試すか、手入力で続けてください。'
+          : pickResult.displayMessage!;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(message),
@@ -361,6 +386,8 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
       return;
     }
 
+    // 成功時はカウンタリセット
+    _consecutiveBrowserBlockedCount = 0;
     final imageBytes = pickResult.imageBytes!;
 
     // OCR処理（Engine経由）
