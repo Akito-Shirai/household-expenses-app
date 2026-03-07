@@ -1,11 +1,51 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:household_mvp/models/transaction.dart';
+import 'package:household_mvp/models/user_settings.dart';
 import 'package:household_mvp/repositories/transaction_repository.dart';
+import 'package:household_mvp/screens/transaction_edit_screen.dart';
+import 'package:household_mvp/services/image_pick/image_pick_adapter.dart';
+import 'package:household_mvp/models/ocr_token.dart';
+import 'package:household_mvp/services/ocr_engine/ocr_engine.dart';
+import 'package:household_mvp/services/receipt_ocr_service.dart';
 import 'package:household_mvp/utils/fx_converter.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-/// TransactionEditScreenの主要ロジック（バリデーション・通貨表示・削除導線）のテスト。
+// ─── テスト用モック ───
+
+/// テスト用モック画像アダプタ（固定の PickImageResult を返す）
+class _MockImagePickAdapter implements ImagePickAdapter {
+  final PickImageResult result;
+  _MockImagePickAdapter(this.result);
+
+  @override
+  Future<PickImageResult> pickImage(ImageSource source) async => result;
+
+  @override
+  void dispose() {}
+}
+
+/// テスト用モックOCRエンジン（常に利用可能、空トークンを返す）
+class _MockOcrEngine implements OcrEngine {
+  @override
+  bool get isAvailable => true;
+
+  @override
+  Future<List<OcrToken>> recognizeFromBytes(Uint8List imageBytes) async => [];
+
+  @override
+  void dispose() {}
+}
+
+/// TransactionEditScreenの主要ロジック（バリデーション・通貨表示・削除導線・OCRフロー）のテスト。
 /// 画面全体はSupabase依存のため、ロジック・UIパーツ単位でテストする。
+/// OCRフロー: 実画面の TransactionEditScreen を pumpWidget し、DI済み
+/// imagePickAdapter / ocrEngine / imageSourceSelector をモック注入して
+/// 各 PickImageStatus に対する UI分岐（SnackBar・ダイアログ・無表示）を検証する。
 void main() {
   group('取引編集: 金額バリデーションロジック', () {
     // _save()内のバリデーション相当のロジックを抽出テスト
@@ -444,6 +484,216 @@ void main() {
       final formatted =
           '${date.year}/${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}';
       expect(formatted, '2026/12/31');
+    });
+  });
+
+  // ─── H-1対応: OCRフロー 実画面 Widget テスト ───
+
+  group('取引編集: OCRフロー 実画面テスト（TransactionEditScreen pumpWidget）', () {
+    // TransactionEditScreen を直接 pumpWidget し、DI済みモックで
+    // _startOcr → pickImage → UI分岐 の実フロー回帰を検証する。
+
+    setUpAll(() async {
+      // テスト用にSupabaseを初期化（ダミー接続先）
+      // _loadCategories は失敗するが、エラーハンドラが catch してフォーム表示に遷移する
+      TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues({});
+      try {
+        await Supabase.initialize(
+          url: 'https://test.supabase.co',
+          anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.'
+              'eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRlc3QiLCJyb2xlIjoiYW5vbiIs'
+              'ImlhdCI6MTYyMDAwMDAwMCwiZXhwIjoxOTM1NjAwMDAwfQ.'
+              'test_signature',
+        );
+      } catch (_) {
+        // 既に初期化済みの場合は無視
+      }
+    });
+
+    /// 指定ステータスを返すモックアダプタ付きの実画面を構築
+    Widget buildScreen(PickImageResult pickResult) {
+      return MaterialApp(
+        home: TransactionEditScreen(
+          userSettings: UserSettings.defaults('test-user'),
+          imagePickAdapter: _MockImagePickAdapter(pickResult),
+          ocrEngine: _MockOcrEngine(),
+          // ImageSourceDialog をスキップし、直接 gallery を返す
+          imageSourceSelector: (_) async => ImageSource.gallery,
+        ),
+      );
+    }
+
+    /// カテゴリ読み込み失敗を待ち、フォーム表示に遷移させるヘルパー
+    Future<void> waitForFormReady(WidgetTester tester) async {
+      // _loadCategories の非同期処理（ネットワークエラー）を消化
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump();
+      // カテゴリ読み込みエラーのSnackBarをクリア（後続テストとの干渉防止）
+      final messenger = tester.state<ScaffoldMessengerState>(
+        find.byType(ScaffoldMessenger),
+      );
+      messenger.clearSnackBars();
+      await tester.pump();
+    }
+
+    /// OCRボタンタップ後、非同期チェーン（imageSourceSelector → pickImage → UI更新）を消化
+    /// pumpAndSettle は SnackBar の自動消去タイマーまで進めてしまうため、
+    /// 個別 pump で非同期完了 + SnackBar表示アニメーションだけ進める
+    Future<void> tapOcrAndSettle(WidgetTester tester) async {
+      await tester.tap(find.text('レシート読み取り'));
+      // 非同期チェーン解決 + SnackBarアニメーション用に十分な pump
+      for (int i = 0; i < 10; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+    }
+
+    testWidgets('browserBlocked: SnackBar文言 + 再試行表示', (tester) async {
+      await tester.pumpWidget(buildScreen(
+        const PickImageResult(PickImageStatus.browserBlocked),
+      ));
+      await waitForFormReady(tester);
+      await tapOcrAndSettle(tester);
+
+      expect(
+        find.text(PickImageStatus.browserBlocked.defaultMessage),
+        findsOneWidget,
+      );
+      expect(find.text('再試行'), findsOneWidget);
+    });
+
+    testWidgets('fileReadError: SnackBar文言 + 再試行表示', (tester) async {
+      await tester.pumpWidget(buildScreen(
+        const PickImageResult(PickImageStatus.fileReadError),
+      ));
+      await waitForFormReady(tester);
+      await tapOcrAndSettle(tester);
+
+      expect(
+        find.text(PickImageStatus.fileReadError.defaultMessage),
+        findsOneWidget,
+      );
+      expect(find.text('再試行'), findsOneWidget);
+    });
+
+    testWidgets('unsupportedFormat: SnackBar文言 + 再試行表示', (tester) async {
+      await tester.pumpWidget(buildScreen(
+        const PickImageResult(PickImageStatus.unsupportedFormat),
+      ));
+      await waitForFormReady(tester);
+      await tapOcrAndSettle(tester);
+
+      expect(
+        find.text(PickImageStatus.unsupportedFormat.defaultMessage),
+        findsOneWidget,
+      );
+      expect(find.text('再試行'), findsOneWidget);
+    });
+
+    testWidgets('fileTooLarge: SnackBar文言 + 再試行表示', (tester) async {
+      await tester.pumpWidget(buildScreen(
+        const PickImageResult(PickImageStatus.fileTooLarge),
+      ));
+      await waitForFormReady(tester);
+      await tapOcrAndSettle(tester);
+
+      expect(
+        find.text(PickImageStatus.fileTooLarge.defaultMessage),
+        findsOneWidget,
+      );
+      expect(find.text('再試行'), findsOneWidget);
+    });
+
+    testWidgets('unknown: SnackBar文言 + 再試行表示', (tester) async {
+      await tester.pumpWidget(buildScreen(
+        const PickImageResult(PickImageStatus.unknown),
+      ));
+      await waitForFormReady(tester);
+      await tapOcrAndSettle(tester);
+
+      expect(
+        find.text(PickImageStatus.unknown.defaultMessage),
+        findsOneWidget,
+      );
+      expect(find.text('再試行'), findsOneWidget);
+    });
+
+    testWidgets('permissionDenied: 権限ダイアログ表示', (tester) async {
+      await tester.pumpWidget(buildScreen(
+        const PickImageResult(PickImageStatus.permissionDenied),
+      ));
+      await waitForFormReady(tester);
+      await tapOcrAndSettle(tester);
+
+      // 権限ダイアログの要素を検証
+      expect(find.text('カメラ/写真へのアクセス'), findsOneWidget);
+      expect(find.text('手入力で続ける'), findsOneWidget);
+      expect(find.text('設定を開く'), findsOneWidget);
+    });
+
+    testWidgets('canceled: 通知なし（SnackBar・ダイアログとも表示されない）',
+        (tester) async {
+      await tester.pumpWidget(buildScreen(
+        const PickImageResult(PickImageStatus.canceled),
+      ));
+      await waitForFormReady(tester);
+      await tapOcrAndSettle(tester);
+
+      // エラー系SnackBarが表示されない（カテゴリ読み込みエラーのSnackBarは除外して検証）
+      expect(find.text('カメラ/写真へのアクセス'), findsNothing);
+      expect(find.text(PickImageStatus.browserBlocked.defaultMessage), findsNothing);
+      expect(find.text(PickImageStatus.unknown.defaultMessage), findsNothing);
+    });
+
+    testWidgets('success: OCR処理開始（エラー表示なし）', (tester) async {
+      await tester.pumpWidget(buildScreen(
+        PickImageResult(
+          PickImageStatus.success,
+          imageBytes: Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]),
+        ),
+      ));
+      await waitForFormReady(tester);
+      await tapOcrAndSettle(tester);
+
+      // エラー系のSnackBar・ダイアログは表示されない
+      expect(find.text('カメラ/写真へのアクセス'), findsNothing);
+      expect(find.text(PickImageStatus.browserBlocked.defaultMessage), findsNothing);
+    });
+
+    testWidgets('errorDetail設定時: カスタムメッセージが優先表示される',
+        (tester) async {
+      await tester.pumpWidget(buildScreen(
+        const PickImageResult(
+          PickImageStatus.fileTooLarge,
+          errorDetail: '画像サイズが大きすぎます（15.2MB）。10MB以下の画像を選択してください。',
+        ),
+      ));
+      await waitForFormReady(tester);
+      await tapOcrAndSettle(tester);
+
+      expect(
+        find.text('画像サイズが大きすぎます（15.2MB）。10MB以下の画像を選択してください。'),
+        findsOneWidget,
+      );
+      expect(find.text('再試行'), findsOneWidget);
+    });
+
+    testWidgets('permissionDenied: 「手入力で続ける」タップでダイアログが閉じる',
+        (tester) async {
+      await tester.pumpWidget(buildScreen(
+        const PickImageResult(PickImageStatus.permissionDenied),
+      ));
+      await waitForFormReady(tester);
+      await tapOcrAndSettle(tester);
+      expect(find.text('カメラ/写真へのアクセス'), findsOneWidget);
+
+      // 「手入力で続ける」タップ
+      await tester.tap(find.text('手入力で続ける'));
+      await tester.pumpAndSettle();
+
+      // ダイアログが閉じている
+      expect(find.text('カメラ/写真へのアクセス'), findsNothing);
     });
   });
 }

@@ -1,6 +1,8 @@
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:household_mvp/models/ocr_token.dart';
 import 'package:household_mvp/models/receipt_ocr_result.dart';
+import 'package:household_mvp/services/image_pick/image_pick_adapter.dart';
 import 'package:household_mvp/services/receipt_ocr_service.dart';
 
 /// コンビニレシートのサンプル
@@ -557,6 +559,447 @@ void main() {
       final result = ReceiptOcrService.extractFromTokens([]);
       expect(result.isEmpty, isTrue);
       expect(result.confidence, 0.0);
+    });
+  });
+
+  // ─── PickImageStatus / PickImageResult テスト ───
+
+  group('PickImageStatus 新種別', () {
+    test('unsupportedFormat が定義されている', () {
+      expect(PickImageStatus.unsupportedFormat, isNotNull);
+      expect(PickImageStatus.unsupportedFormat.name, 'unsupportedFormat');
+    });
+
+    test('fileTooLarge が定義されている', () {
+      expect(PickImageStatus.fileTooLarge, isNotNull);
+      expect(PickImageStatus.fileTooLarge.name, 'fileTooLarge');
+    });
+
+    test('PickImageResult に errorDetail を設定できる', () {
+      const result = PickImageResult(
+        PickImageStatus.unsupportedFormat,
+        errorDetail: 'テスト詳細メッセージ',
+      );
+      expect(result.status, PickImageStatus.unsupportedFormat);
+      expect(result.errorDetail, 'テスト詳細メッセージ');
+      expect(result.imageBytes, isNull);
+    });
+
+    test('PickImageResult の success には imageBytes を設定できる', () {
+      final bytes = Uint8List.fromList([1, 2, 3]);
+      final result = PickImageResult(
+        PickImageStatus.success,
+        imageBytes: bytes,
+      );
+      expect(result.status, PickImageStatus.success);
+      expect(result.imageBytes, bytes);
+      expect(result.errorDetail, isNull);
+    });
+
+    test('全ステータスが switch で網羅できる', () {
+      // コンパイル時に網羅性が保証される（非網羅ならビルドエラー）
+      for (final status in PickImageStatus.values) {
+        final label = switch (status) {
+          PickImageStatus.success => 'ok',
+          PickImageStatus.canceled => 'cancel',
+          PickImageStatus.permissionDenied => 'perm',
+          PickImageStatus.browserBlocked => 'blocked',
+          PickImageStatus.fileReadError => 'read',
+          PickImageStatus.unsupportedFormat => 'format',
+          PickImageStatus.fileTooLarge => 'size',
+          PickImageStatus.unknown => 'unknown',
+        };
+        expect(label, isNotEmpty);
+      }
+    });
+  });
+
+  // ─── 失敗種別カウンタ テスト ───
+
+  group('失敗種別カウンタ（匿名メトリクス）', () {
+    setUp(() {
+      ReceiptOcrService.resetPickFailureCounts();
+    });
+
+    test('失敗を記録するとカウンタが増える', () {
+      ReceiptOcrService.recordPickFailure(PickImageStatus.unknown);
+      ReceiptOcrService.recordPickFailure(PickImageStatus.unknown);
+      ReceiptOcrService.recordPickFailure(PickImageStatus.unsupportedFormat);
+
+      final counts = ReceiptOcrService.pickFailureCounts;
+      expect(counts[PickImageStatus.unknown], 2);
+      expect(counts[PickImageStatus.unsupportedFormat], 1);
+    });
+
+    test('success / canceled は記録されない', () {
+      ReceiptOcrService.recordPickFailure(PickImageStatus.success);
+      ReceiptOcrService.recordPickFailure(PickImageStatus.canceled);
+
+      final counts = ReceiptOcrService.pickFailureCounts;
+      expect(counts[PickImageStatus.success], isNull);
+      expect(counts[PickImageStatus.canceled], isNull);
+    });
+
+    test('リセットでカウンタがクリアされる', () {
+      ReceiptOcrService.recordPickFailure(PickImageStatus.fileTooLarge);
+      expect(ReceiptOcrService.pickFailureCounts[PickImageStatus.fileTooLarge], 1);
+
+      ReceiptOcrService.resetPickFailureCounts();
+      expect(ReceiptOcrService.pickFailureCounts, isEmpty);
+    });
+
+    test('browserBlocked / fileReadError も記録される', () {
+      ReceiptOcrService.recordPickFailure(PickImageStatus.browserBlocked);
+      ReceiptOcrService.recordPickFailure(PickImageStatus.fileReadError);
+      ReceiptOcrService.recordPickFailure(PickImageStatus.browserBlocked);
+
+      final counts = ReceiptOcrService.pickFailureCounts;
+      expect(counts[PickImageStatus.browserBlocked], 2);
+      expect(counts[PickImageStatus.fileReadError], 1);
+    });
+  });
+
+  // ─── Web画像取得フロー回帰テスト ───
+
+  group('Web画像取得: 失敗分類', () {
+    test('browserBlocked の PickImageResult が正しく構成される', () {
+      const result = PickImageResult(
+        PickImageStatus.browserBlocked,
+        errorDetail: 'ブラウザの制約でファイル選択を開始できませんでした。再試行してください。',
+      );
+      expect(result.status, PickImageStatus.browserBlocked);
+      expect(result.errorDetail, contains('ブラウザ'));
+      expect(result.imageBytes, isNull);
+    });
+
+    test('fileReadError の PickImageResult が正しく構成される', () {
+      const result = PickImageResult(
+        PickImageStatus.fileReadError,
+        errorDetail: '画像の読み込みに失敗しました。別の画像で再試行してください。',
+      );
+      expect(result.status, PickImageStatus.fileReadError);
+      expect(result.errorDetail, contains('読み込み'));
+      expect(result.imageBytes, isNull);
+    });
+
+    test('unknown の PickImageResult が正しく構成される', () {
+      const result = PickImageResult(
+        PickImageStatus.unknown,
+        errorDetail: '画像取得に失敗しました。再試行または手入力で続けてください。',
+      );
+      expect(result.status, PickImageStatus.unknown);
+      expect(result.errorDetail, contains('再試行'));
+      expect(result.imageBytes, isNull);
+    });
+
+    test('fileTooLarge にサイズ情報が含まれる', () {
+      const result = PickImageResult(
+        PickImageStatus.fileTooLarge,
+        errorDetail: '画像サイズが大きすぎます（15.2MB）。10MB以下の画像を選択してください。',
+      );
+      expect(result.status, PickImageStatus.fileTooLarge);
+      expect(result.errorDetail, contains('15.2MB'));
+      expect(result.errorDetail, contains('10MB'));
+    });
+  });
+
+  // ─── UI分岐ロジック回帰テスト ───
+
+  group('PickImageResult: displayMessage（UI表示メッセージ）', () {
+    test('success は null を返す', () {
+      final result = PickImageResult(
+        PickImageStatus.success,
+        imageBytes: Uint8List.fromList([0xFF, 0xD8]),
+      );
+      expect(result.displayMessage, isNull);
+    });
+
+    test('canceled は null を返す', () {
+      const result = PickImageResult(PickImageStatus.canceled);
+      expect(result.displayMessage, isNull);
+    });
+
+    test('browserBlocked はデフォルトメッセージを返す', () {
+      const result = PickImageResult(PickImageStatus.browserBlocked);
+      expect(result.displayMessage, contains('ブラウザ'));
+      expect(result.displayMessage, contains('再試行'));
+    });
+
+    test('fileReadError はデフォルトメッセージを返す', () {
+      const result = PickImageResult(PickImageStatus.fileReadError);
+      expect(result.displayMessage, contains('読み込み'));
+      expect(result.displayMessage, contains('再試行'));
+    });
+
+    test('unsupportedFormat はデフォルトメッセージを返す', () {
+      const result = PickImageResult(PickImageStatus.unsupportedFormat);
+      expect(result.displayMessage, contains('JPEG/PNG'));
+    });
+
+    test('fileTooLarge はデフォルトメッセージを返す', () {
+      const result = PickImageResult(PickImageStatus.fileTooLarge);
+      expect(result.displayMessage, contains('10MB'));
+    });
+
+    test('unknown はデフォルトメッセージを返す', () {
+      const result = PickImageResult(PickImageStatus.unknown);
+      expect(result.displayMessage, contains('手入力'));
+    });
+
+    test('errorDetail が設定されている場合はそちらを優先', () {
+      const result = PickImageResult(
+        PickImageStatus.fileTooLarge,
+        errorDetail: 'カスタムメッセージ: 15.2MB',
+      );
+      expect(result.displayMessage, 'カスタムメッセージ: 15.2MB');
+    });
+
+    test('permissionDenied はデフォルトメッセージを返す', () {
+      const result = PickImageResult(PickImageStatus.permissionDenied);
+      expect(result.displayMessage, contains('アクセス'));
+    });
+  });
+
+  group('PickImageResult: shouldShowRetry（再試行導線）', () {
+    test('success は再試行不要', () {
+      final result = PickImageResult(
+        PickImageStatus.success,
+        imageBytes: Uint8List(0),
+      );
+      expect(result.shouldShowRetry, isFalse);
+    });
+
+    test('canceled は再試行不要', () {
+      const result = PickImageResult(PickImageStatus.canceled);
+      expect(result.shouldShowRetry, isFalse);
+    });
+
+    test('permissionDenied は再試行不要（ダイアログで対応）', () {
+      const result = PickImageResult(PickImageStatus.permissionDenied);
+      expect(result.shouldShowRetry, isFalse);
+    });
+
+    test('browserBlocked は再試行あり', () {
+      const result = PickImageResult(PickImageStatus.browserBlocked);
+      expect(result.shouldShowRetry, isTrue);
+    });
+
+    test('fileReadError は再試行あり', () {
+      const result = PickImageResult(PickImageStatus.fileReadError);
+      expect(result.shouldShowRetry, isTrue);
+    });
+
+    test('unsupportedFormat は再試行あり', () {
+      const result = PickImageResult(PickImageStatus.unsupportedFormat);
+      expect(result.shouldShowRetry, isTrue);
+    });
+
+    test('fileTooLarge は再試行あり', () {
+      const result = PickImageResult(PickImageStatus.fileTooLarge);
+      expect(result.shouldShowRetry, isTrue);
+    });
+
+    test('unknown は再試行あり', () {
+      const result = PickImageResult(PickImageStatus.unknown);
+      expect(result.shouldShowRetry, isTrue);
+    });
+  });
+
+  group('PickImageStatus: defaultMessage（PRD定義文言との一致）', () {
+    test('browserBlocked の文言がPRD定義と一致', () {
+      expect(
+        PickImageStatus.browserBlocked.defaultMessage,
+        'ブラウザの制約でファイル選択を開始できませんでした。再試行してください。',
+      );
+    });
+
+    test('fileReadError の文言がPRD定義と一致', () {
+      expect(
+        PickImageStatus.fileReadError.defaultMessage,
+        '画像の読み込みに失敗しました。別の画像で再試行してください。',
+      );
+    });
+
+    test('unsupportedFormat の文言がPRD定義と一致', () {
+      expect(
+        PickImageStatus.unsupportedFormat.defaultMessage,
+        contains('JPEG/PNG'),
+      );
+    });
+
+    test('unknown の文言がPRD定義と一致', () {
+      expect(
+        PickImageStatus.unknown.defaultMessage,
+        '画像取得に失敗しました。再試行または手入力で続けてください。',
+      );
+    });
+
+    test('全ステータスのdefaultMessageが非null', () {
+      for (final status in PickImageStatus.values) {
+        expect(status.defaultMessage, isNotNull);
+        expect(status.defaultMessage, isA<String>());
+      }
+    });
+  });
+
+  group('Web画像取得: 画像形式判定（isValidImageFormat）', () {
+    test('JPEG ファイル（0xFF 0xD8 先頭）は有効', () {
+      final jpeg = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]);
+      expect(isValidImageFormat(jpeg), isTrue);
+    });
+
+    test('PNG ファイル（0x89 0x50 0x4E 0x47 先頭）は有効', () {
+      final png = Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A]);
+      expect(isValidImageFormat(png), isTrue);
+    });
+
+    test('GIF ファイルは無効', () {
+      final gif = Uint8List.fromList([0x47, 0x49, 0x46, 0x38, 0x37, 0x61]);
+      expect(isValidImageFormat(gif), isFalse);
+    });
+
+    test('WebP ファイルは無効', () {
+      final webp = Uint8List.fromList([0x52, 0x49, 0x46, 0x46, 0x00, 0x00]);
+      expect(isValidImageFormat(webp), isFalse);
+    });
+
+    test('空バイト列は無効', () {
+      expect(isValidImageFormat(Uint8List(0)), isFalse);
+    });
+
+    test('3バイト未満は無効', () {
+      expect(isValidImageFormat(Uint8List.fromList([0xFF, 0xD8, 0xFF])), isFalse);
+    });
+  });
+
+  // ─── 例外→ステータス変換テスト（classifyPickException） ───
+
+  group('classifyPickException: 例外→PickImageStatus 変換', () {
+    test('PlatformException camera_access_denied → permissionDenied', () {
+      final result = classifyPickException(
+        PlatformException(code: 'camera_access_denied'),
+      );
+      expect(result.status, PickImageStatus.permissionDenied);
+    });
+
+    test('PlatformException photo_access_denied → permissionDenied', () {
+      final result = classifyPickException(
+        PlatformException(code: 'photo_access_denied'),
+      );
+      expect(result.status, PickImageStatus.permissionDenied);
+    });
+
+    test('Web + PlatformException（権限以外）→ browserBlocked', () {
+      final result = classifyPickException(
+        PlatformException(code: 'some_error'),
+        isWeb: true,
+      );
+      expect(result.status, PickImageStatus.browserBlocked);
+      expect(result.errorDetail, contains('ブラウザ'));
+    });
+
+    test('Web + 一般例外 → browserBlocked', () {
+      final result = classifyPickException(
+        Exception('test error'),
+        isWeb: true,
+      );
+      expect(result.status, PickImageStatus.browserBlocked);
+    });
+
+    test('Mobile + 一般例外 → unknown', () {
+      final result = classifyPickException(
+        Exception('test error'),
+      );
+      expect(result.status, PickImageStatus.unknown);
+      expect(result.errorDetail, contains('手入力'));
+    });
+
+    test('Mobile + PlatformException（権限以外）→ unknown', () {
+      final result = classifyPickException(
+        PlatformException(code: 'unknown_error'),
+      );
+      expect(result.status, PickImageStatus.unknown);
+    });
+  });
+
+  // ─── バイト列検証テスト（validateImageBytes） ───
+
+  group('validateImageBytes: サイズ/形式チェック', () {
+    test('正常な JPEG バイト列は null（問題なし）', () {
+      final jpeg = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0, ...List.filled(100, 0)]);
+      expect(validateImageBytes(jpeg), isNull);
+    });
+
+    test('正常な PNG バイト列は null（問題なし）', () {
+      final png = Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, ...List.filled(100, 0)]);
+      expect(validateImageBytes(png), isNull);
+    });
+
+    test('10MB超のバイト列 → fileTooLarge', () {
+      // 10MB + 1バイトのダミーJPEGデータ
+      final oversized = Uint8List(10 * 1024 * 1024 + 1);
+      oversized[0] = 0xFF;
+      oversized[1] = 0xD8;
+      final result = validateImageBytes(oversized);
+      expect(result, isNotNull);
+      expect(result!.status, PickImageStatus.fileTooLarge);
+      expect(result.errorDetail, contains('10MB'));
+    });
+
+    test('非対応形式のバイト列 → unsupportedFormat', () {
+      final gif = Uint8List.fromList([0x47, 0x49, 0x46, 0x38, 0x37, 0x61]);
+      final result = validateImageBytes(gif);
+      expect(result, isNotNull);
+      expect(result!.status, PickImageStatus.unsupportedFormat);
+      expect(result.errorDetail, contains('JPEG/PNG'));
+    });
+
+    test('10MB丁度は通過', () {
+      final exact = Uint8List(10 * 1024 * 1024);
+      exact[0] = 0xFF;
+      exact[1] = 0xD8;
+      expect(validateImageBytes(exact), isNull);
+    });
+  });
+
+  // ─── OCRフロー統合テスト（モックアダプタ経由） ───
+
+  group('OCRフロー: モックアダプタ → UI分岐シミュレーション', () {
+    // 各ステータスでモックアダプタを作り、displayMessage / shouldShowRetry を検証
+    for (final testCase in [
+      (PickImageStatus.browserBlocked, true, 'ブラウザ'),
+      (PickImageStatus.fileReadError, true, '読み込み'),
+      (PickImageStatus.unsupportedFormat, true, 'JPEG/PNG'),
+      (PickImageStatus.fileTooLarge, true, '10MB'),
+      (PickImageStatus.unknown, true, '手入力'),
+    ]) {
+      test('${testCase.$1.name}: メッセージ表示あり + 再試行あり', () {
+        final result = PickImageResult(testCase.$1);
+        expect(result.displayMessage, isNotNull);
+        expect(result.displayMessage, contains(testCase.$3));
+        expect(result.shouldShowRetry, testCase.$2);
+      });
+    }
+
+    test('success: メッセージなし + 再試行なし', () {
+      final result = PickImageResult(
+        PickImageStatus.success,
+        imageBytes: Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]),
+      );
+      expect(result.displayMessage, isNull);
+      expect(result.shouldShowRetry, isFalse);
+    });
+
+    test('canceled: メッセージなし + 再試行なし', () {
+      const result = PickImageResult(PickImageStatus.canceled);
+      expect(result.displayMessage, isNull);
+      expect(result.shouldShowRetry, isFalse);
+    });
+
+    test('permissionDenied: メッセージあり + 再試行なし（ダイアログ対応）', () {
+      const result = PickImageResult(PickImageStatus.permissionDenied);
+      expect(result.displayMessage, isNotNull);
+      expect(result.shouldShowRetry, isFalse);
     });
   });
 }

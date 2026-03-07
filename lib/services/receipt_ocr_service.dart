@@ -1,6 +1,4 @@
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
-import 'package:image_picker/image_picker.dart';
 
 import '../models/ocr_token.dart';
 import '../models/receipt_ocr_result.dart';
@@ -24,15 +22,68 @@ enum PickImageStatus {
   /// 権限拒否（カメラ/フォトライブラリ）
   permissionDenied,
 
-  /// その他のエラー
-  failed,
+  /// ブラウザ制約でファイル選択を開始できない
+  browserBlocked,
+
+  /// 画像の読み込み失敗（ファイル破損等）
+  fileReadError,
+
+  /// 非対応の画像形式（JPEG/PNG以外）
+  unsupportedFormat,
+
+  /// ファイルサイズ超過
+  fileTooLarge,
+
+  /// 未分類のエラー
+  unknown,
 }
 
 /// 画像取得の結果（プラットフォーム非依存: Uint8List）
 class PickImageResult {
   final PickImageStatus status;
   final Uint8List? imageBytes;
-  const PickImageResult(this.status, [this.imageBytes]);
+
+  /// UI向け補足メッセージ（失敗時の詳細説明）
+  final String? errorDetail;
+
+  const PickImageResult(this.status, {this.imageBytes, this.errorDetail});
+
+  /// UI表示用メッセージ（errorDetail 優先、なければデフォルト文言）
+  ///
+  /// success / canceled には null を返す（通知不要のため）。
+  String? get displayMessage {
+    if (status == PickImageStatus.success ||
+        status == PickImageStatus.canceled) {
+      return null;
+    }
+    return errorDetail ?? status.defaultMessage;
+  }
+
+  /// 「再試行」導線を表示すべきか
+  bool get shouldShowRetry =>
+      status != PickImageStatus.success &&
+      status != PickImageStatus.canceled &&
+      status != PickImageStatus.permissionDenied;
+}
+
+/// PickImageStatus のデフォルトUI文言
+extension PickImageStatusMessage on PickImageStatus {
+  /// 各種別のデフォルト表示メッセージ
+  String get defaultMessage => switch (this) {
+        PickImageStatus.success => '',
+        PickImageStatus.canceled => '',
+        PickImageStatus.permissionDenied => 'カメラ/写真ライブラリへのアクセスが必要です。',
+        PickImageStatus.browserBlocked =>
+          'ブラウザの制約でファイル選択を開始できませんでした。再試行してください。',
+        PickImageStatus.fileReadError =>
+          '画像の読み込みに失敗しました。別の画像で再試行してください。',
+        PickImageStatus.unsupportedFormat =>
+          '対応していない画像形式です。JPEG/PNG画像を選択してください。',
+        PickImageStatus.fileTooLarge =>
+          '画像サイズが大きすぎます。10MB以下の画像を選択してください。',
+        PickImageStatus.unknown =>
+          '画像取得に失敗しました。再試行または手入力で続けてください。',
+      };
 }
 
 /// レシートOCRサービス（オンデバイス処理、画像非送信）
@@ -43,9 +94,6 @@ class PickImageResult {
 ///   - ReceiptOcrService（オーケストレーション）: 画像取得→OCR→抽出の統合
 class ReceiptOcrService {
   const ReceiptOcrService._();
-
-  /// 画像長辺の上限（リサイズ用）
-  static const int _maxImageDimension = 2048;
 
   /// OCR処理のタイムアウト（秒）
   static const int timeoutSeconds = 12;
@@ -59,6 +107,31 @@ class ReceiptOcrService {
   /// 今日の実行回数（アプリ再起動でリセット）
   static int _todayCount = 0;
   static DateTime _lastResetDate = DateTime.now();
+
+  /// 画像取得の失敗種別カウンタ（匿名メトリクス、PII なし）
+  static final Map<PickImageStatus, int> _pickFailureCounts = {};
+
+  /// 画像取得失敗をカウントし、種別をログ出力する
+  static void recordPickFailure(PickImageStatus status) {
+    if (status == PickImageStatus.success ||
+        status == PickImageStatus.canceled) {
+      return;
+    }
+    _pickFailureCounts[status] = (_pickFailureCounts[status] ?? 0) + 1;
+    debugPrint(
+      'ReceiptOcrService: 画像取得失敗 [${status.name}] '
+      '累計: ${_pickFailureCounts[status]}',
+    );
+  }
+
+  /// 現在の失敗種別カウンタを取得（テスト・デバッグ用）
+  @visibleForTesting
+  static Map<PickImageStatus, int> get pickFailureCounts =>
+      Map.unmodifiable(_pickFailureCounts);
+
+  /// 失敗種別カウンタをリセット（テスト用）
+  @visibleForTesting
+  static void resetPickFailureCounts() => _pickFailureCounts.clear();
 
   /// 店名の除外キーワード
   static const List<String> merchantExcludeKeywords = [
@@ -114,37 +187,6 @@ class ReceiptOcrService {
   static void _incrementCount() {
     _resetCountIfNewDay();
     _todayCount++;
-  }
-
-  // ─── 画像取得 ───
-
-  /// カメラまたはライブラリから画像を選択（結果型で理由を返す）
-  static Future<PickImageResult> pickImage(ImageSource source) async {
-    try {
-      final picker = ImagePicker();
-      final xFile = await picker.pickImage(
-        source: source,
-        maxWidth: _maxImageDimension.toDouble(),
-        maxHeight: _maxImageDimension.toDouble(),
-        imageQuality: 85,
-      );
-      if (xFile == null) {
-        return const PickImageResult(PickImageStatus.canceled);
-      }
-      // プラットフォーム非依存: XFile からバイト列を読み取る
-      final bytes = await xFile.readAsBytes();
-      return PickImageResult(PickImageStatus.success, bytes);
-    } on PlatformException catch (e) {
-      debugPrint('ReceiptOcrService: 画像取得エラー: $e');
-      if (e.code == 'camera_access_denied' ||
-          e.code == 'photo_access_denied') {
-        return const PickImageResult(PickImageStatus.permissionDenied);
-      }
-      return const PickImageResult(PickImageStatus.failed);
-    } catch (e) {
-      debugPrint('ReceiptOcrService: 画像取得エラー: $e');
-      return const PickImageResult(PickImageStatus.failed);
-    }
   }
 
   // ─── OCR実行（Engine経由） ───

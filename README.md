@@ -359,6 +359,34 @@ flutter analyze   # 静的解析
 flutter test      # 全テスト（236テスト）
 ```
 
+## Web画像取得の信頼性改善 (Step 14)
+
+Webでレシート画像取得が失敗しやすい問題を解消し、失敗時の原因をUIで区別できるようにしました。
+
+### 画像取得アダプタ
+- **プラットフォーム別アダプタ**: OcrEngine と同じ条件付きインポートパターンで画像取得を分離
+- **Mobile**: 従来の ImagePicker 経由（カメラ/ギャラリー選択、権限チェック）
+- **Web**: ファイル形式チェック（JPEG/PNG、先頭バイト判定）＋サイズ上限チェック（10MB）
+
+### 失敗分類とUIメッセージ
+- **browserBlocked**: ブラウザ制約でファイル選択を開始できない場合
+- **fileReadError**: 画像の読み込みに失敗した場合（ファイル破損等）
+- **unsupportedFormat**: JPEG/PNG以外の画像を選択した場合
+- **fileTooLarge**: 10MBを超える画像を選択した場合
+- **permissionDenied**: カメラ/写真ライブラリへのアクセスが拒否された場合
+- **unknown**: 未分類のエラー
+- 各失敗時に「再試行」ボタン付き SnackBar を表示（permissionDenied は専用ダイアログ）
+
+### 匿名メトリクス
+- 失敗種別カウンタ（`debugPrint` ベース、PII非保存）
+
+### 確認手順
+```bash
+flutter analyze   # 静的解析
+flutter test      # 全テスト（277テスト）
+flutter build web # Webビルド
+```
+
 ## トラブルシューティング
 
 ### RLS 42501 エラー（カテゴリ追加/取引保存が失敗する）
