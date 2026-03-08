@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import '../models/ocr_token.dart';
 import '../models/receipt_ocr_result.dart';
 import 'ocr_engine/ocr_engine.dart';
+import 'receipt_image_preprocessor.dart';
 
 /// スコア付き抽出結果（内部使用）
 class ScoredResult<T> {
@@ -92,6 +93,19 @@ extension PickImageStatusMessage on PickImageStatus {
       };
 }
 
+/// 合計ラベルの重み付きルール
+///
+/// 複数ラベル一致時に weight が大きい方を優先する。
+class TotalLabelRule {
+  /// マッチ対象の文字列パターン
+  final String pattern;
+
+  /// ラベルの優先度（1.0 が最高）
+  final double weight;
+
+  const TotalLabelRule(this.pattern, this.weight);
+}
+
 /// レシートOCRサービス（オンデバイス処理、画像非送信）
 ///
 /// 3層構成:
@@ -148,14 +162,28 @@ class ReceiptOcrService {
     '領収', '明細', '税', 'http', 'www',
   ];
 
-  /// 合計金額の優先キーワード
+  /// 合計金額の重み付きラベルルール
   ///
-  /// 「税込」は単独では商品行（例: 「お茶 税込 108」）に誤マッチするため除外。
+  /// 複数ラベル一致時は weight が大きいルールを優先する。
+  /// 「税込」は単独では商品行に誤マッチするため含めない。
   /// 「税込合計」「合計(税込)」は「合計」でマッチする。
-  static const List<String> totalPriorityKeywords = [
-    '合計', 'ご請求', 'お会計',
-    '請求額', '決済額', '利用金額', 'TOTAL', 'Total',
+  static const List<TotalLabelRule> totalLabelRules = [
+    // weight 1.0: 「合計」を含むラベル（最優先）
+    TotalLabelRule('合計', 1.0),
+    // weight 0.8: 請求系ラベル
+    TotalLabelRule('ご請求', 0.8),
+    TotalLabelRule('請求額', 0.8),
+    TotalLabelRule('お会計', 0.8),
+    TotalLabelRule('TOTAL', 0.8),
+    TotalLabelRule('Total', 0.8),
+    // weight 0.6: その他の合計系ラベル
+    TotalLabelRule('利用金額', 0.6),
+    TotalLabelRule('決済額', 0.6),
   ];
+
+  /// 後方互換: ラベルパターン一覧（内部でルール参照が必要な箇所向け）
+  static List<String> get totalPriorityKeywords =>
+      totalLabelRules.map((r) => r.pattern).toList();
 
   /// 合計金額の除外キーワード
   static const List<String> totalExcludeKeywords = [
@@ -203,15 +231,24 @@ class ReceiptOcrService {
   /// 画像バイト列からOCRを実行し結果を抽出
   ///
   /// [engine] はプラットフォーム別の OcrEngine 実装。
+  /// [preprocessor] が渡された場合、OCR 前に画像前処理を適用する。
   /// 一時ファイルの管理は Engine 側で行う。
   static Future<ReceiptOcrResult?> processImageBytes(
     Uint8List imageBytes,
-    OcrEngine engine,
-  ) async {
+    OcrEngine engine, {
+    ReceiptImagePreprocessor? preprocessor,
+  }) async {
     _incrementCount();
     try {
+      // 前処理（HEIC→JPEG 変換、向き補正、リサイズ等）
+      Uint8List ocrInput = imageBytes;
+      if (preprocessor != null) {
+        final preprocessed = await preprocessor.preprocess(imageBytes);
+        ocrInput = preprocessed.bytes;
+      }
+
       final tokens = await engine
-          .recognizeFromBytes(imageBytes)
+          .recognizeFromBytes(ocrInput)
           .timeout(Duration(seconds: timeoutSeconds));
 
       if (tokens.isEmpty) {
@@ -382,68 +419,67 @@ class ReceiptOcrService {
     return results;
   }
 
-  /// ラベルキーワード直後の最も近い金額候補を選ぶ
-  ///
-  /// [candidates] は `extractAmountCandidates()` の結果。
-  /// [normalizedText] は `normalizeAmountText()` 適用済みの行テキスト。
-  /// ラベル末尾位置以降で最も近い金額を優先し、なければ全候補から最近を返す。
-  static (int amount, int position) _pickClosestToLabel(
-    List<(int amount, int position)> candidates,
-    String normalizedText,
-  ) {
-    // ラベルキーワードの末尾位置を特定
-    int labelEnd = 0;
-    for (final kw in totalPriorityKeywords) {
-      final idx = normalizedText.indexOf(kw);
-      if (idx >= 0) {
-        final end = idx + kw.length;
-        if (end > labelEnd) labelEnd = end;
+  /// 行テキストから最高 weight のラベルルールを探す
+  static TotalLabelRule? _findBestLabelRule(String text) {
+    TotalLabelRule? best;
+    for (final rule in totalLabelRules) {
+      if (text.contains(rule.pattern)) {
+        if (best == null || rule.weight > best.weight) {
+          best = rule;
+        }
       }
     }
-
-    // ラベル直後の最も近い金額を優先
-    final afterLabel = candidates.where((c) => c.$2 >= labelEnd).toList();
-    if (afterLabel.isNotEmpty) {
-      return afterLabel.reduce((a, b) => a.$2 < b.$2 ? a : b);
-    }
-    // ラベル後にない場合は全候補から最もラベルに近いものを選ぶ
-    return candidates.reduce(
-      (a, b) =>
-          (a.$2 - labelEnd).abs() < (b.$2 - labelEnd).abs() ? a : b,
-    );
+    return best;
   }
 
   // ─── 合計金額抽出（テキスト行ベース） ───
 
   /// 合計ラベル起点で金額を抽出（bbox なし経路）
   ///
-  /// 1. 合計ラベルを含む行の行末金額を最優先
+  /// 1. 全行をスキャンし、最高 weight のラベル行から金額を抽出
   /// 2. ラベル行が見つからない場合のみ、全行から補助的に候補を探す
   @visibleForTesting
   static ScoredResult<int>? extractTotal(List<String> lines) {
-    // ── Phase 1: 合計ラベル行の行末金額を探す ──
+    // ── Phase 1: 全行から最高 weight のラベル行を探す ──
+    double bestWeight = -1;
+    ScoredResult<int>? bestLabelResult;
+
     for (int i = 0; i < lines.length; i++) {
       final line = lines[i];
 
       // 除外キーワードのみの行はスキップ
       if (totalExcludeKeywords.any((kw) => line.contains(kw)) &&
-          !totalPriorityKeywords.any((kw) => line.contains(kw))) {
+          !totalLabelRules.any((r) => line.contains(r.pattern))) {
         continue;
       }
 
-      // 合計ラベルがあるか
-      if (!totalPriorityKeywords.any((kw) => line.contains(kw))) continue;
+      // この行の最高 weight ラベルを探す
+      final bestRule = _findBestLabelRule(line);
+      if (bestRule == null) continue;
 
-      // この行から金額候補を抽出
-      final candidates = extractAmountCandidates(line);
+      // 現在のベストより低い weight ならスキップ
+      if (bestRule.weight <= bestWeight) continue;
+
+      // ラベル直後の部分文字列から金額候補を抽出
+      // 行全体を normalizeAmountText すると l→1 + 空白除去で
+      // ラベル末尾と金額が結合する問題を回避する（例: Total 200 → T0ta1200）
+      final labelIdx = line.indexOf(bestRule.pattern);
+      final afterLabel = line.substring(
+        labelIdx + bestRule.pattern.length,
+      );
+      final candidates = extractAmountCandidates(afterLabel);
       if (candidates.isEmpty) continue;
 
-      // ラベル直後の最も近い金額を優先
-      final normalizedLine = normalizeAmountText(line);
-      final best = _pickClosestToLabel(candidates, normalizedLine);
+      // ラベル直後の最も近い金額候補を選ぶ
+      final best = candidates.reduce(
+        (a, b) => a.$2 < b.$2 ? a : b,
+      );
+      bestWeight = bestRule.weight;
       // ラベル行の金額は高スコア（2.0 基準）
-      return ScoredResult(best.$1, 2.0);
+      bestLabelResult = ScoredResult(best.$1, 2.0);
     }
+
+    if (bestLabelResult != null) return bestLabelResult;
 
     // ── Phase 2: フォールバック（ラベル行なし → 補助的候補探索） ──
     double bestScore = -1;
@@ -655,8 +691,9 @@ class ReceiptOcrService {
     // token を擬似行にグルーピング
     final pseudoLines = groupTokensIntoLines(bboxTokens, sameLineThreshold);
 
-    // ── Phase 1: 合計ラベル行の右側金額を探す ──
+    // ── Phase 1: 全行から最高 weight のラベル行を探し、右側金額を採用 ──
     ScoredResult<int>? bestLabelResult;
+    double bestLabelWeight = -1;
     double bestLabelScore = -1;
 
     for (final line in pseudoLines) {
@@ -665,31 +702,46 @@ class ReceiptOcrService {
 
       // 除外キーワードのみの行はスキップ
       if (totalExcludeKeywords.any((kw) => lineText.contains(kw)) &&
-          !totalPriorityKeywords.any((kw) => lineText.contains(kw))) {
+          !totalLabelRules.any((r) => lineText.contains(r.pattern))) {
         continue;
       }
 
-      // 合計ラベルを含むトークンを検索
+      // この行で最高 weight のラベルを含むトークンを検索
       OcrToken? labelToken;
+      TotalLabelRule? lineRule;
       for (final token in line) {
         final text = token.text.trim();
-        if (totalPriorityKeywords.any((kw) => text.contains(kw))) {
+        final rule = _findBestLabelRule(text);
+        if (rule != null &&
+            (lineRule == null || rule.weight > lineRule.weight)) {
+          lineRule = rule;
           labelToken = token;
-          break;
         }
       }
-      if (labelToken == null) continue;
+      if (labelToken == null || lineRule == null) continue;
+
+      // 現在のベストより低い weight ならスキップ
+      if (lineRule.weight < bestLabelWeight) continue;
 
       // ラベルトークン自体に金額が含まれるケース（例: 「合計 ¥334」）
-      final labelCandidates = extractAmountCandidates(labelToken.text);
-      if (labelCandidates.isNotEmpty) {
-        // ラベル直後の最も近い金額を優先
-        final normalizedLabel = normalizeAmountText(labelToken.text);
-        final best = _pickClosestToLabel(labelCandidates, normalizedLabel);
-        const score = 3.0; // ラベル内金額は最高スコア
-        if (score > bestLabelScore) {
-          bestLabelScore = score;
-          bestLabelResult = ScoredResult(best.$1, score);
+      // ラベル直後の部分文字列から金額を抽出（l→1+空白除去の結合問題を回避）
+      final labelText = labelToken.text.trim();
+      final tokenLabelIdx = labelText.indexOf(lineRule.pattern);
+      if (tokenLabelIdx >= 0) {
+        final afterTokenLabel = labelText.substring(
+          tokenLabelIdx + lineRule.pattern.length,
+        );
+        final labelCandidates = extractAmountCandidates(afterTokenLabel);
+        if (labelCandidates.isNotEmpty) {
+          final best = labelCandidates.reduce(
+            (a, b) => a.$2 < b.$2 ? a : b,
+          );
+          const score = 3.0; // ラベル内金額は最高スコア
+          if (lineRule.weight > bestLabelWeight || score > bestLabelScore) {
+            bestLabelWeight = lineRule.weight;
+            bestLabelScore = score;
+            bestLabelResult = ScoredResult(best.$1, score);
+          }
         }
       }
 
@@ -706,7 +758,8 @@ class ReceiptOcrService {
           final proximityBonus =
               (1.0 / (1.0 + xDist / 100.0)).clamp(0.0, 0.5);
           final score = 2.5 + proximityBonus;
-          if (score > bestLabelScore) {
+          if (lineRule.weight > bestLabelWeight || score > bestLabelScore) {
+            bestLabelWeight = lineRule.weight;
             bestLabelScore = score;
             bestLabelResult = ScoredResult(amount, score);
           }

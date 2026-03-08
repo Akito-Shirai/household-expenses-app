@@ -13,6 +13,7 @@ import '../repositories/category_repository.dart';
 import '../repositories/transaction_repository.dart';
 import '../services/image_pick/image_pick_adapter.dart';
 import '../services/ocr_engine/ocr_engine.dart';
+import '../services/receipt_image_preprocessor.dart';
 import '../services/receipt_ocr_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/error_handler.dart';
@@ -116,6 +117,7 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
   void dispose() {
     _ocrEngine?.dispose();
     _imagePickAdapter?.dispose();
+    _preprocessor?.dispose();
     _amountController.dispose();
     _unitPriceController.dispose();
     _quantityController.dispose();
@@ -301,11 +303,18 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
 
   OcrEngine? _ocrEngine;
   ImagePickAdapter? _imagePickAdapter;
+  ReceiptImagePreprocessor? _preprocessor;
 
   /// OCRエンジンを取得（DI or 遅延初期化）
   OcrEngine get _engine {
     _ocrEngine ??= widget.ocrEngine ?? createOcrEngine();
     return _ocrEngine!;
+  }
+
+  /// 画像前処理を取得（遅延初期化）
+  ReceiptImagePreprocessor get _imagePreprocessor {
+    _preprocessor ??= createImagePreprocessor();
+    return _preprocessor!;
   }
 
   /// 画像取得アダプタを取得（DI or 遅延初期化）
@@ -396,6 +405,7 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
       final result = await ReceiptOcrService.processImageBytes(
         imageBytes,
         _engine,
+        preprocessor: _imagePreprocessor,
       );
 
       if (!mounted) return;
