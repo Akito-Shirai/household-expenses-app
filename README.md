@@ -387,6 +387,42 @@ flutter test      # 全テスト（277テスト）
 flutter build web # Webビルド
 ```
 
+## 画像前処理・ラベル優先度改善 (Step 18)
+
+### 画像前処理（HEIC/HEIF 正規化）
+- **モバイル**: `flutter_image_compress` により OCR 前に以下を自動適用
+  - HEIC/HEIF → JPEG 変換
+  - EXIF orientation 補正
+  - 長辺 2048px リサイズ
+  - JPEG 品質 85 正規化
+- **Web**: パススルー（JPEG/PNG のみ受付のため不要）
+- 前処理失敗時は元画像で OCR を続行（フォールバック）
+
+### 重み付きラベル辞書
+- `合計` / `税込合計` / `総合計`: weight 1.0（最優先）
+- `ご請求額` / `お会計` / `TOTAL` / `Total`: weight 0.8
+- `利用金額` / `決済額`: weight 0.6
+- 複数ラベル一致時は weight が最も高いラベルの横の金額を採用
+
+### HEIC 実画像の確認手順（モバイル実機）
+1. iPhone で撮影した HEIC 画像を用意する
+2. 同じ画像を JPEG に変換したものも用意する（Preview.app で書き出し等）
+3. アプリの支出追加画面で「レシート読み取り」→ HEIC 画像を選択
+4. 同じレシートの JPEG 画像でも同様に OCR を実行
+5. 両者で店名・合計金額の抽出結果を比較し、HEIC でも安定して抽出できることを確認
+6. デバッグログで `MobileImagePreprocessor: 前処理完了` が出力されていることを確認
+
+### フォーマット検出
+- マジックバイト判定: JPEG (FF D8), PNG (89 50 4E 47), HEIC/HEIF (ftyp ボックス)
+- mimeType ヒントによるフォールバック判定
+
+### 確認手順
+```bash
+flutter analyze   # 静的解析
+flutter test      # 全テスト
+flutter build web # Webビルド
+```
+
 ## トラブルシューティング
 
 ### RLS 42501 エラー（カテゴリ追加/取引保存が失敗する）

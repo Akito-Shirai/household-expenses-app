@@ -3,6 +3,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:household_mvp/models/ocr_token.dart';
 import 'package:household_mvp/models/receipt_ocr_result.dart';
 import 'package:household_mvp/services/image_pick/image_pick_adapter.dart';
+import 'package:household_mvp/services/receipt_image_preprocessor.dart';
+import 'package:household_mvp/services/receipt_image_preprocessor_stub.dart';
 import 'package:household_mvp/services/receipt_ocr_service.dart';
 
 /// コンビニレシートのサンプル
@@ -605,6 +607,30 @@ void main() {
       expect(result!.value, 1234);
     });
 
+    test('H-1: Fee 100 Total 200 → Total 直後の 200 を返す', () {
+      final result = ReceiptOcrService.extractTotal([
+        'Fee 100 Total 200',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 200);
+    });
+
+    test('H-1: TOTAL 200 Fee 100 → TOTAL 直後の 200 を返す', () {
+      final result = ReceiptOcrService.extractTotal([
+        'TOTAL 200 Fee 100',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 200);
+    });
+
+    test('H-1: Total ¥1,580 Change ¥420 → Total 直後の 1580 を返す', () {
+      final result = ReceiptOcrService.extractTotal([
+        'Total ¥1,580 Change ¥420',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 1580);
+    });
+
     test('OCR 誤認: 合計 ¥3O4 → 304 に正規化される', () {
       final result = ReceiptOcrService.extractTotal([
         '合計 ¥3O4',
@@ -668,6 +694,53 @@ void main() {
       expect(result, isNotNull);
       expect(result!.value, 1580);
       expect(result.score, 2.0); // ラベル行スコア
+    });
+
+    // ── 複数ラベル一致時の重み優先テスト ──
+
+    test('合計 vs ご請求額: 合計（weight 1.0）が優先される', () {
+      final result = ReceiptOcrService.extractTotal([
+        'ご請求額 2,916',
+        '合計 2,916',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 2916);
+    });
+
+    test('合計 vs 利用金額: 合計（weight 1.0）が優先される', () {
+      final result = ReceiptOcrService.extractTotal([
+        '利用金額 ¥1,580',
+        '合計 ¥1,580',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 1580);
+    });
+
+    test('TOTAL vs 合計: 合計（weight 1.0）が優先される', () {
+      final result = ReceiptOcrService.extractTotal([
+        'TOTAL 1,234',
+        '合計 1,234',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 1234);
+    });
+
+    test('税込合計 vs ご請求額: 税込合計（合計 weight 1.0）が優先される', () {
+      final result = ReceiptOcrService.extractTotal([
+        'ご請求額 1,580',
+        '税込合計 1,580',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 1580);
+    });
+
+    test('利用金額のみの場合でも正常に抽出される', () {
+      final result = ReceiptOcrService.extractTotal([
+        '利用金額 ¥1,580',
+        'ポイント +15P',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 1580);
     });
   });
 
@@ -789,6 +862,56 @@ void main() {
       expect(result, isNotNull);
       // フォールバック経路でも金額自体は取れる
       expect(result!.value, 334);
+    });
+
+    // ── 複数ラベル一致時の重み優先テスト（bbox 版） ──
+
+    test('bbox: 合計 vs ご請求額 → 合計（weight 1.0）が優先される', () {
+      final tokens = [
+        OcrToken(
+          text: 'ご請求額',
+          bbox: const OcrBoundingBox(x: 10, y: 200, width: 80, height: 20),
+        ),
+        OcrToken(
+          text: '¥2,916',
+          bbox: const OcrBoundingBox(x: 200, y: 200, width: 80, height: 20),
+        ),
+        OcrToken(
+          text: '合計',
+          bbox: const OcrBoundingBox(x: 10, y: 240, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '¥2,916',
+          bbox: const OcrBoundingBox(x: 200, y: 240, width: 80, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractTotalFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 2916);
+    });
+
+    test('bbox: TOTAL vs 合計 → 合計（weight 1.0）が優先される', () {
+      final tokens = [
+        OcrToken(
+          text: 'TOTAL',
+          bbox: const OcrBoundingBox(x: 10, y: 200, width: 80, height: 20),
+        ),
+        OcrToken(
+          text: '¥1,234',
+          bbox: const OcrBoundingBox(x: 200, y: 200, width: 80, height: 20),
+        ),
+        OcrToken(
+          text: '合計',
+          bbox: const OcrBoundingBox(x: 10, y: 240, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '¥1,234',
+          bbox: const OcrBoundingBox(x: 200, y: 240, width: 80, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractTotalFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 1234);
     });
   });
 
@@ -1281,6 +1404,153 @@ void main() {
   });
 
   // ─── OCRフロー統合テスト（モックアダプタ経由） ───
+
+  // ─── 前処理レイヤーテスト ───
+
+  group('画像前処理: StubImagePreprocessor（パススルー）', () {
+    test('JPEG バイト列はパススルーされる', () async {
+      final preprocessor = StubImagePreprocessor();
+      final jpeg = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0, ...List.filled(100, 0)]);
+      final result = await preprocessor.preprocess(jpeg);
+      expect(result.bytes, jpeg);
+      expect(result.format, 'jpeg');
+      expect(result.converted, isFalse);
+    });
+
+    test('PNG バイト列はパススルーされる', () async {
+      final preprocessor = StubImagePreprocessor();
+      final png = Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, ...List.filled(100, 0)]);
+      final result = await preprocessor.preprocess(png);
+      expect(result.bytes, png);
+      expect(result.format, 'png');
+      expect(result.converted, isFalse);
+    });
+
+    test('不明形式は unknown フォーマットでパススルーされる', () async {
+      final preprocessor = StubImagePreprocessor();
+      final unknown = Uint8List.fromList([0x00, 0x01, 0x02, 0x03]);
+      final result = await preprocessor.preprocess(unknown);
+      expect(result.bytes, unknown);
+      expect(result.format, 'unknown');
+      expect(result.converted, isFalse);
+    });
+
+    test('HEIC バイト列（ftyp ボックス）が heic として検出される', () async {
+      final preprocessor = StubImagePreprocessor();
+      // HEIC magic: offset 4-7 が 'ftyp'
+      final heic = Uint8List.fromList([
+        0x00, 0x00, 0x00, 0x1C, // サイズ
+        0x66, 0x74, 0x79, 0x70, // 'ftyp'
+        0x68, 0x65, 0x69, 0x63, // 'heic'
+        ...List.filled(20, 0),
+      ]);
+      final result = await preprocessor.preprocess(heic);
+      expect(result.format, 'heic');
+      // Stub はパススルーなので変換されない
+      expect(result.converted, isFalse);
+      expect(result.bytes, heic);
+    });
+
+    test('mimeType ヒントで HEIC が検出される', () async {
+      final preprocessor = StubImagePreprocessor();
+      // マジックバイトなしでも mimeType で判定
+      final bytes = Uint8List.fromList([0x00, 0x01, 0x02, 0x03]);
+      final result = await preprocessor.preprocess(
+        bytes, mimeType: 'image/heic',
+      );
+      expect(result.format, 'heic');
+    });
+  });
+
+  // ─── フォーマット検出テスト ───
+
+  group('detectImageFormat: マジックバイト判定', () {
+    test('JPEG マジックバイト', () {
+      final jpeg = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]);
+      expect(detectImageFormat(jpeg), 'jpeg');
+    });
+
+    test('PNG マジックバイト', () {
+      final png = Uint8List.fromList([0x89, 0x50, 0x4E, 0x47]);
+      expect(detectImageFormat(png), 'png');
+    });
+
+    test('HEIC ftyp ボックス', () {
+      final heic = Uint8List.fromList([
+        0x00, 0x00, 0x00, 0x1C,
+        0x66, 0x74, 0x79, 0x70, // 'ftyp'
+        0x68, 0x65, 0x69, 0x63, // 'heic'
+      ]);
+      expect(detectImageFormat(heic), 'heic');
+    });
+
+    test('mimeType ヒント: image/heif → heic', () {
+      final bytes = Uint8List.fromList([0x00, 0x01, 0x02, 0x03]);
+      expect(detectImageFormat(bytes, mimeType: 'image/heif'), 'heic');
+    });
+
+    test('mimeType ヒント: image/jpeg → jpeg', () {
+      final bytes = Uint8List.fromList([0x00, 0x01, 0x02, 0x03]);
+      expect(detectImageFormat(bytes, mimeType: 'image/jpeg'), 'jpeg');
+    });
+
+    test('mimeType ヒント: image/png → png', () {
+      final bytes = Uint8List.fromList([0x00, 0x01, 0x02, 0x03]);
+      expect(detectImageFormat(bytes, mimeType: 'image/png'), 'png');
+    });
+
+    test('判定不能 → unknown', () {
+      final bytes = Uint8List.fromList([0x00, 0x01, 0x02, 0x03]);
+      expect(detectImageFormat(bytes), 'unknown');
+    });
+
+    test('マジックバイトが mimeType より優先される', () {
+      // JPEG マジックバイトだが mimeType は png → jpeg を返す
+      final jpeg = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]);
+      expect(detectImageFormat(jpeg, mimeType: 'image/png'), 'jpeg');
+    });
+  });
+
+  // ─── 重み付きラベルルールテスト ───
+
+  group('TotalLabelRule: 重み付きラベル辞書', () {
+    test('合計 が weight 1.0 の最高優先度', () {
+      final rules = ReceiptOcrService.totalLabelRules;
+      final gokeiRule = rules.firstWhere((r) => r.pattern == '合計');
+      expect(gokeiRule.weight, 1.0);
+    });
+
+    test('ご請求 が weight 0.8', () {
+      final rules = ReceiptOcrService.totalLabelRules;
+      final rule = rules.firstWhere((r) => r.pattern == 'ご請求');
+      expect(rule.weight, 0.8);
+    });
+
+    test('TOTAL が weight 0.8', () {
+      final rules = ReceiptOcrService.totalLabelRules;
+      final rule = rules.firstWhere((r) => r.pattern == 'TOTAL');
+      expect(rule.weight, 0.8);
+    });
+
+    test('利用金額 が weight 0.6', () {
+      final rules = ReceiptOcrService.totalLabelRules;
+      final rule = rules.firstWhere((r) => r.pattern == '利用金額');
+      expect(rule.weight, 0.6);
+    });
+
+    test('税込 は辞書に含まれない', () {
+      final rules = ReceiptOcrService.totalLabelRules;
+      expect(rules.any((r) => r.pattern == '税込'), isFalse);
+    });
+
+    test('totalPriorityKeywords 後方互換が機能する', () {
+      final keywords = ReceiptOcrService.totalPriorityKeywords;
+      expect(keywords, contains('合計'));
+      expect(keywords, contains('TOTAL'));
+      expect(keywords, contains('利用金額'));
+      expect(keywords, isNot(contains('税込')));
+    });
+  });
 
   group('OCRフロー: モックアダプタ → UI分岐シミュレーション', () {
     // 各ステータスでモックアダプタを作り、displayMessage / shouldShowRetry を検証
