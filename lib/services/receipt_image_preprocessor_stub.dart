@@ -14,11 +14,14 @@ class StubImagePreprocessor implements ReceiptImagePreprocessor {
   }) async {
     // パススルー: 変換なしでそのまま返す
     final format = detectImageFormat(bytes, mimeType: mimeType);
+    final dims = parseImageDimensions(bytes);
     return PreprocessResult(
       bytes: bytes,
       format: format,
       converted: false,
       appliedSteps: const [],
+      width: dims?.width,
+      height: dims?.height,
     );
   }
 

@@ -1511,6 +1511,239 @@ void main() {
     });
   });
 
+  // ─── 画像サイズパーサーテスト ───
+
+  group('parseImageDimensions: ヘッダーからサイズ取得', () {
+    test('JPEG SOF0 マーカーから width/height を取得', () {
+      // 最小限の JPEG 構造: SOI + SOF0
+      // SOF0: FF C0 [len 2B] [precision 1B] [height 2B] [width 2B]
+      final jpeg = Uint8List.fromList([
+        0xFF, 0xD8, // SOI
+        0xFF, 0xC0, // SOF0
+        0x00, 0x0B, // length = 11
+        0x08, // precision
+        0x03, 0x00, // height = 768
+        0x04, 0x00, // width = 1024
+        0x03, // components
+        0x01, 0x22, 0x00,
+      ]);
+      final dims = parseImageDimensions(jpeg);
+      expect(dims, isNotNull);
+      expect(dims!.width, 1024);
+      expect(dims.height, 768);
+    });
+
+    test('JPEG SOF2（プログレッシブ）マーカーから取得', () {
+      final jpeg = Uint8List.fromList([
+        0xFF, 0xD8, // SOI
+        0xFF, 0xC2, // SOF2 (progressive)
+        0x00, 0x0B, // length
+        0x08, // precision
+        0x08, 0x00, // height = 2048
+        0x06, 0x00, // width = 1536
+        0x03,
+        0x01, 0x22, 0x00,
+      ]);
+      final dims = parseImageDimensions(jpeg);
+      expect(dims, isNotNull);
+      expect(dims!.width, 1536);
+      expect(dims.height, 2048);
+    });
+
+    test('PNG IHDR チャンクから width/height を取得', () {
+      // PNG signature (8B) + IHDR chunk length (4B) + "IHDR" (4B) + width (4B) + height (4B)
+      final png = Uint8List.fromList([
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // signature
+        0x00, 0x00, 0x00, 0x0D, // IHDR length
+        0x49, 0x48, 0x44, 0x52, // "IHDR"
+        0x00, 0x00, 0x03, 0x20, // width = 800
+        0x00, 0x00, 0x02, 0x58, // height = 600
+      ]);
+      final dims = parseImageDimensions(png);
+      expect(dims, isNotNull);
+      expect(dims!.width, 800);
+      expect(dims.height, 600);
+    });
+
+    test('短すぎるバイト列は null', () {
+      final bytes = Uint8List.fromList([0xFF, 0xD8]);
+      expect(parseImageDimensions(bytes), isNull);
+    });
+
+    test('不明フォーマットは null', () {
+      final bytes = Uint8List.fromList([0x00, 0x01, 0x02, 0x03, 0x04]);
+      expect(parseImageDimensions(bytes), isNull);
+    });
+
+    test('JPEG で SOF マーカーがない場合は null', () {
+      // SOI のみで SOF なし
+      final jpeg = Uint8List.fromList([
+        0xFF, 0xD8, // SOI
+        0xFF, 0xD9, // EOI
+      ]);
+      expect(parseImageDimensions(jpeg), isNull);
+    });
+
+    test('HEIC ispe ボックスから width/height を取得', () {
+      // HEIC ファイルの簡易構造: ftyp + 中間データ + ispe ボックス
+      // ispe: [size 4B][type 4B='ispe'][ver+flags 4B][width 4B][height 4B]
+      final heic = Uint8List.fromList([
+        // ftyp ボックス (12 bytes)
+        0x00, 0x00, 0x00, 0x0C, // size = 12
+        0x66, 0x74, 0x79, 0x70, // 'ftyp'
+        0x68, 0x65, 0x69, 0x63, // 'heic'
+        // 中間データ（padding）
+        ...List.filled(20, 0x00),
+        // ispe ボックス (20 bytes)
+        0x00, 0x00, 0x00, 0x14, // size = 20
+        0x69, 0x73, 0x70, 0x65, // 'ispe'
+        0x00, 0x00, 0x00, 0x00, // version + flags
+        0x00, 0x00, 0x10, 0x00, // width = 4096
+        0x00, 0x00, 0x0C, 0x00, // height = 3072
+      ]);
+      final dims = parseImageDimensions(heic);
+      expect(dims, isNotNull);
+      expect(dims!.width, 4096);
+      expect(dims.height, 3072);
+    });
+
+    test('HEIC で ispe ボックスがない場合は null', () {
+      // ftyp のみで ispe なし
+      final heic = Uint8List.fromList([
+        0x00, 0x00, 0x00, 0x0C,
+        0x66, 0x74, 0x79, 0x70, // 'ftyp'
+        0x68, 0x65, 0x69, 0x63, // 'heic'
+        ...List.filled(20, 0x00),
+      ]);
+      expect(parseImageDimensions(heic), isNull);
+    });
+
+    test('HEIC ispe で異常サイズ（width=0）はスキップ', () {
+      final heic = Uint8List.fromList([
+        0x00, 0x00, 0x00, 0x0C,
+        0x66, 0x74, 0x79, 0x70,
+        0x68, 0x65, 0x69, 0x63,
+        ...List.filled(20, 0x00),
+        // ispe with width=0
+        0x00, 0x00, 0x00, 0x14,
+        0x69, 0x73, 0x70, 0x65,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, // width = 0
+        0x00, 0x00, 0x0C, 0x00, // height = 3072
+      ]);
+      expect(parseImageDimensions(heic), isNull);
+    });
+
+    test('HEIC 複数 ispe → 最大面積が返る（サムネイル + 本体）', () {
+      // IMG_1783.HEIC 相当: サムネイル 640x896 + 本体 5712x4284
+      final heic = Uint8List.fromList([
+        // ftyp ボックス
+        0x00, 0x00, 0x00, 0x0C,
+        0x66, 0x74, 0x79, 0x70, // 'ftyp'
+        0x68, 0x65, 0x69, 0x63, // 'heic'
+        // 中間データ
+        ...List.filled(20, 0x00),
+        // ispe #1: サムネイル 640x896
+        0x00, 0x00, 0x00, 0x14, // size = 20
+        0x69, 0x73, 0x70, 0x65, // 'ispe'
+        0x00, 0x00, 0x00, 0x00, // version + flags
+        0x00, 0x00, 0x02, 0x80, // width = 640
+        0x00, 0x00, 0x03, 0x80, // height = 896
+        // 中間データ
+        ...List.filled(40, 0x00),
+        // ispe #2: 本体 5712x4284
+        0x00, 0x00, 0x00, 0x14, // size = 20
+        0x69, 0x73, 0x70, 0x65, // 'ispe'
+        0x00, 0x00, 0x00, 0x00, // version + flags
+        0x00, 0x00, 0x16, 0x50, // width = 5712
+        0x00, 0x00, 0x10, 0xBC, // height = 4284
+      ]);
+      final dims = parseImageDimensions(heic);
+      expect(dims, isNotNull);
+      expect(dims!.width, 5712);
+      expect(dims.height, 4284);
+    });
+
+    test('HEIC 複数 ispe → 順序無関係で最大が返る', () {
+      // 本体が先、サムネイルが後の場合でも最大が返る
+      final heic = Uint8List.fromList([
+        // ftyp ボックス
+        0x00, 0x00, 0x00, 0x0C,
+        0x66, 0x74, 0x79, 0x70,
+        0x68, 0x65, 0x69, 0x63,
+        ...List.filled(20, 0x00),
+        // ispe #1: 本体 4032x3024
+        0x00, 0x00, 0x00, 0x14,
+        0x69, 0x73, 0x70, 0x65,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x0F, 0xC0, // width = 4032
+        0x00, 0x00, 0x0B, 0xD0, // height = 3024
+        ...List.filled(40, 0x00),
+        // ispe #2: サムネイル 320x240
+        0x00, 0x00, 0x00, 0x14,
+        0x69, 0x73, 0x70, 0x65,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0x40, // width = 320
+        0x00, 0x00, 0x00, 0xF0, // height = 240
+      ]);
+      final dims = parseImageDimensions(heic);
+      expect(dims, isNotNull);
+      expect(dims!.width, 4032);
+      expect(dims.height, 3024);
+    });
+  });
+
+  group('PreprocessResult: dimensions', () {
+    test('width/height が設定される', () {
+      final result = PreprocessResult(
+        bytes: Uint8List(0),
+        format: 'jpeg',
+        width: 1024,
+        height: 768,
+      );
+      expect(result.width, 1024);
+      expect(result.height, 768);
+      expect(result.dimensionsString, '1024x768');
+    });
+
+    test('width/height が null の場合 unknown', () {
+      final result = PreprocessResult(
+        bytes: Uint8List(0),
+        format: 'jpeg',
+      );
+      expect(result.width, isNull);
+      expect(result.height, isNull);
+      expect(result.dimensionsString, 'unknown');
+    });
+  });
+
+  group('StubImagePreprocessor: dimensions 取得', () {
+    test('JPEG バイト列から dimensions が取得される', () async {
+      final preprocessor = StubImagePreprocessor();
+      final jpeg = Uint8List.fromList([
+        0xFF, 0xD8, // SOI
+        0xFF, 0xC0, // SOF0
+        0x00, 0x0B,
+        0x08,
+        0x02, 0x00, // height = 512
+        0x03, 0x00, // width = 768
+        0x03,
+        0x01, 0x22, 0x00,
+      ]);
+      final result = await preprocessor.preprocess(jpeg);
+      expect(result.width, 768);
+      expect(result.height, 512);
+    });
+
+    test('不明フォーマットでは dimensions が null', () async {
+      final preprocessor = StubImagePreprocessor();
+      final unknown = Uint8List.fromList([0x00, 0x01, 0x02, 0x03]);
+      final result = await preprocessor.preprocess(unknown);
+      expect(result.width, isNull);
+      expect(result.height, isNull);
+    });
+  });
+
   // ─── 重み付きラベルルールテスト ───
 
   group('TotalLabelRule: 重み付きラベル辞書', () {
@@ -1588,6 +1821,232 @@ void main() {
       const result = PickImageResult(PickImageStatus.permissionDenied);
       expect(result.displayMessage, isNotNull);
       expect(result.shouldShowRetry, isFalse);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // Step19: ラベル正規化（T19-04）
+  // ══════════════════════════════════════════════════════════════
+
+  group('normalizeLabelText: ラベル正規化', () {
+    test('ASCII 空白が除去される', () {
+      expect(ReceiptOcrService.normalizeLabelText('合 計'), '合計');
+    });
+
+    test('全角空白が除去される', () {
+      expect(ReceiptOcrService.normalizeLabelText('合\u3000計'), '合計');
+    });
+
+    test('タブが除去される', () {
+      expect(ReceiptOcrService.normalizeLabelText('合\t計'), '合計');
+    });
+
+    test('複数空白が除去される', () {
+      expect(ReceiptOcrService.normalizeLabelText('合  計'), '合計');
+    });
+
+    test('空白なしはそのまま', () {
+      expect(ReceiptOcrService.normalizeLabelText('合計'), '合計');
+    });
+  });
+
+  group('Step19: 空白分断ラベルの抽出', () {
+    test('合 計 ¥670 → 670 が抽出される', () {
+      final result = ReceiptOcrService.extractTotal([
+        '合 計 ¥670',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 670);
+      expect(result.score, 2.0);
+    });
+
+    test('合　計 ¥670（全角空白）→ 670 が抽出される', () {
+      final result = ReceiptOcrService.extractTotal([
+        '合\u3000計 ¥670',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 670);
+      expect(result.score, 2.0);
+    });
+
+    test('合  計 ¥670（複数空白）→ 670 が抽出される', () {
+      final result = ReceiptOcrService.extractTotal([
+        '合  計 ¥670',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 670);
+      expect(result.score, 2.0);
+    });
+
+    test('bbox: 合 + 計 が別トークン → ラベル行として検出される', () {
+      final tokens = [
+        OcrToken(
+          text: '合',
+          bbox: const OcrBoundingBox(x: 10, y: 200, width: 20, height: 20),
+        ),
+        OcrToken(
+          text: '計',
+          bbox: const OcrBoundingBox(x: 35, y: 200, width: 20, height: 20),
+        ),
+        OcrToken(
+          text: '¥670',
+          bbox: const OcrBoundingBox(x: 200, y: 200, width: 60, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractTotalFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 670);
+      // Phase 1 のラベル行として検出される（スコア 2.5 以上）
+      expect(result.score, greaterThanOrEqualTo(2.5));
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // Step19: Fallback 除外強化（T19-05）
+  // ══════════════════════════════════════════════════════════════
+
+  group('Step19: fallback 除外強化', () {
+    test('PayPay支払 ¥670 は除外される', () {
+      final result = ReceiptOcrService.extractTotal([
+        'PayPay支払 ¥670',
+      ]);
+      // ラベルなし + 除外キーワードあり → null
+      expect(result, isNull);
+    });
+
+    test('税率 8%対象 ¥667 は除外される', () {
+      final result = ReceiptOcrService.extractTotal([
+        '税率 8%対象 ¥667',
+      ]);
+      expect(result, isNull);
+    });
+
+    test('現金 ¥1,000 は除外される', () {
+      final result = ReceiptOcrService.extractTotal([
+        '現金 ¥1,000',
+      ]);
+      expect(result, isNull);
+    });
+
+    test('電子マネー ¥670 は除外される', () {
+      final result = ReceiptOcrService.extractTotal([
+        '電子マネー ¥670',
+      ]);
+      expect(result, isNull);
+    });
+
+    test('カード ¥670 は除外される', () {
+      final result = ReceiptOcrService.extractTotal([
+        'カード ¥670',
+      ]);
+      expect(result, isNull);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // Step19: サンプル回帰テスト（T19-06）
+  // ══════════════════════════════════════════════════════════════
+
+  group('Step19: IMG_1783 サンプル回帰', () {
+    test('合計 ¥670 vs 小計 ¥618 → 合計が優先される', () {
+      final result = ReceiptOcrService.extractTotal([
+        '小計 ¥618',
+        '消費税等 ¥49',
+        '合計 ¥670',
+        'PayPay支払 ¥670',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 670);
+      expect(result.score, 2.0);
+    });
+
+    test('合 計 ¥670 vs 税率行 → 合計が優先される', () {
+      final result = ReceiptOcrService.extractTotal([
+        '小計(税抜10%) ¥3',
+        '税率 8%対象 ¥667',
+        '小計 ¥618',
+        '合 計 ¥670',
+        'PayPay支払 ¥670',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 670);
+      expect(result.score, 2.0);
+    });
+
+    test('bbox: 合計 vs PayPay支払 → 合計が優先される', () {
+      final tokens = [
+        OcrToken(
+          text: '小計',
+          bbox: const OcrBoundingBox(x: 10, y: 100, width: 60, height: 16),
+        ),
+        OcrToken(
+          text: '¥618',
+          bbox: const OcrBoundingBox(x: 200, y: 100, width: 60, height: 16),
+        ),
+        OcrToken(
+          text: '消費税等',
+          bbox: const OcrBoundingBox(x: 10, y: 120, width: 80, height: 16),
+        ),
+        OcrToken(
+          text: '¥49',
+          bbox: const OcrBoundingBox(x: 200, y: 120, width: 40, height: 16),
+        ),
+        OcrToken(
+          text: '合計',
+          bbox: const OcrBoundingBox(x: 10, y: 160, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '¥670',
+          bbox: const OcrBoundingBox(x: 200, y: 160, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: 'PayPay支払',
+          bbox: const OcrBoundingBox(x: 10, y: 200, width: 120, height: 16),
+        ),
+        OcrToken(
+          text: '¥670',
+          bbox: const OcrBoundingBox(x: 200, y: 200, width: 60, height: 16),
+        ),
+      ];
+      final result = ReceiptOcrService.extractTotalFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 670);
+    });
+
+    test('bbox: 合 + 計 分断 + PayPay支払 → 合計が優先される', () {
+      final tokens = [
+        OcrToken(
+          text: '小計',
+          bbox: const OcrBoundingBox(x: 10, y: 100, width: 60, height: 16),
+        ),
+        OcrToken(
+          text: '¥618',
+          bbox: const OcrBoundingBox(x: 200, y: 100, width: 60, height: 16),
+        ),
+        OcrToken(
+          text: '合',
+          bbox: const OcrBoundingBox(x: 10, y: 160, width: 20, height: 20),
+        ),
+        OcrToken(
+          text: '計',
+          bbox: const OcrBoundingBox(x: 35, y: 160, width: 20, height: 20),
+        ),
+        OcrToken(
+          text: '¥670',
+          bbox: const OcrBoundingBox(x: 200, y: 160, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: 'PayPay支払',
+          bbox: const OcrBoundingBox(x: 10, y: 200, width: 120, height: 16),
+        ),
+        OcrToken(
+          text: '¥670',
+          bbox: const OcrBoundingBox(x: 200, y: 200, width: 60, height: 16),
+        ),
+      ];
+      final result = ReceiptOcrService.extractTotalFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 670);
     });
   });
 }

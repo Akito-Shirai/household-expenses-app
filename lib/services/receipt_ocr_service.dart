@@ -190,6 +190,9 @@ class ReceiptOcrService {
     '小計', 'お釣り', 'おつり', '預り', 'お預り',
     'お支払', 'ポイント', '手数料', '値引', '割引', '返品',
     '内税', '外税', '消費税', '税額',
+    // Step19: 支払手段・税率行の誤検出防止
+    '支払', 'PayPay', '税率', '対象',
+    '内消費税', '電子マネー', 'カード', '現金',
   ];
 
   /// 日付パターン（金額誤認防止）
@@ -240,16 +243,39 @@ class ReceiptOcrService {
   }) async {
     _incrementCount();
     try {
+      // ── 観測点: pick 直後 ──
+      final inputFormat = detectImageFormat(imageBytes);
+      final inputDims = parseImageDimensions(imageBytes);
+      debugPrint(
+        'ReceiptOcrService: pick後 '
+        'format=$inputFormat bytes=${imageBytes.length} '
+        'dims=${inputDims != null ? "${inputDims.width}x${inputDims.height}" : "unknown"}',
+      );
+
       // 前処理（HEIC→JPEG 変換、向き補正、リサイズ等）
       Uint8List ocrInput = imageBytes;
       if (preprocessor != null) {
         final preprocessed = await preprocessor.preprocess(imageBytes);
         ocrInput = preprocessed.bytes;
+        // ── 観測点: preprocess 後 ──
+        debugPrint(
+          'ReceiptOcrService: preprocess後 '
+          'format=${preprocessed.format} '
+          'bytes=${ocrInput.length} '
+          'dims=${preprocessed.dimensionsString} '
+          'converted=${preprocessed.converted} '
+          'steps=[${preprocessed.appliedSteps.join(", ")}]',
+        );
       }
 
       final tokens = await engine
           .recognizeFromBytes(ocrInput)
           .timeout(Duration(seconds: timeoutSeconds));
+
+      // ── 観測点: OCR 後 ──
+      debugPrint(
+        'ReceiptOcrService: OCR後 tokenCount=${tokens.length}',
+      );
 
       if (tokens.isEmpty) {
         debugPrint('ReceiptOcrService: OCRトークン空');
@@ -257,7 +283,17 @@ class ReceiptOcrService {
       }
 
       // トークンからテキストを結合して抽出（bbox版は Step13-D で追加）
-      return extractFromTokens(tokens);
+      final result = extractFromTokens(tokens);
+
+      // ── 観測点: 抽出結果 ──
+      debugPrint(
+        'ReceiptOcrService: 抽出結果 '
+        'merchant=${result.merchantName} '
+        'total=${result.totalAmount} '
+        'confidence=${result.confidence.toStringAsFixed(2)}',
+      );
+
+      return result;
     } catch (e) {
       debugPrint('ReceiptOcrService: OCR処理エラー: $e');
       return null;
@@ -419,11 +455,42 @@ class ReceiptOcrService {
     return results;
   }
 
+  /// ラベル検出用にテキストを正規化する
+  ///
+  /// OCR で `合 計` のように空白分断されたラベルを `合計` として
+  /// 検出できるよう、ASCII / 全角空白を除去する。
+  /// 金額候補の正規化（normalizeAmountText）とは別の関数。
+  @visibleForTesting
+  static String normalizeLabelText(String text) {
+    return text
+        .replaceAll(' ', '') // ASCII 空白
+        .replaceAll('\u3000', '') // 全角空白
+        .replaceAll('\t', ''); // タブ
+  }
+
+  /// 空白分断されたラベルの末尾位置を原文から探す
+  ///
+  /// 正規化でマッチしたが原文には空白が挟まるケース
+  /// （例: `合 計` + pattern `合計`）で、ラベル末尾の原文位置を返す。
+  static int _findLabelEndInOriginal(String original, String pattern) {
+    int searchFrom = 0;
+    for (int i = 0; i < pattern.length; i++) {
+      final charIdx = original.indexOf(pattern[i], searchFrom);
+      if (charIdx < 0) return original.length;
+      searchFrom = charIdx + 1;
+    }
+    return searchFrom;
+  }
+
   /// 行テキストから最高 weight のラベルルールを探す
+  ///
+  /// 原文と正規化テキスト（空白除去済み）の両方でマッチを試みる。
+  /// 空白分断された `合 計` も `合計` ルールでマッチする。
   static TotalLabelRule? _findBestLabelRule(String text) {
+    final normalized = normalizeLabelText(text);
     TotalLabelRule? best;
     for (final rule in totalLabelRules) {
-      if (text.contains(rule.pattern)) {
+      if (text.contains(rule.pattern) || normalized.contains(rule.pattern)) {
         if (best == null || rule.weight > best.weight) {
           best = rule;
         }
@@ -447,14 +514,14 @@ class ReceiptOcrService {
     for (int i = 0; i < lines.length; i++) {
       final line = lines[i];
 
-      // 除外キーワードのみの行はスキップ
+      // この行の最高 weight ラベルを探す（正規化対応）
+      final bestRule = _findBestLabelRule(line);
+
+      // 除外キーワードのみの行はスキップ（ラベルがあれば除外しない）
       if (totalExcludeKeywords.any((kw) => line.contains(kw)) &&
-          !totalLabelRules.any((r) => line.contains(r.pattern))) {
+          bestRule == null) {
         continue;
       }
-
-      // この行の最高 weight ラベルを探す
-      final bestRule = _findBestLabelRule(line);
       if (bestRule == null) continue;
 
       // 現在のベストより低い weight ならスキップ
@@ -464,9 +531,15 @@ class ReceiptOcrService {
       // 行全体を normalizeAmountText すると l→1 + 空白除去で
       // ラベル末尾と金額が結合する問題を回避する（例: Total 200 → T0ta1200）
       final labelIdx = line.indexOf(bestRule.pattern);
-      final afterLabel = line.substring(
-        labelIdx + bestRule.pattern.length,
-      );
+      final int afterLabelIdx;
+      if (labelIdx >= 0) {
+        // 原文でそのまま見つかった
+        afterLabelIdx = labelIdx + bestRule.pattern.length;
+      } else {
+        // 正規化経由でマッチ（例: `合 計` → `合計`）
+        afterLabelIdx = _findLabelEndInOriginal(line, bestRule.pattern);
+      }
+      final afterLabel = line.substring(afterLabelIdx);
       final candidates = extractAmountCandidates(afterLabel);
       if (candidates.isEmpty) continue;
 
@@ -477,6 +550,12 @@ class ReceiptOcrService {
       bestWeight = bestRule.weight;
       // ラベル行の金額は高スコア（2.0 基準）
       bestLabelResult = ScoredResult(best.$1, 2.0);
+
+      debugPrint(
+        'ReceiptOcrService: ラベル候補 '
+        'label="${bestRule.pattern}" weight=${bestRule.weight} '
+        'amount=${best.$1} line="$line"',
+      );
     }
 
     if (bestLabelResult != null) return bestLabelResult;
@@ -700,15 +779,11 @@ class ReceiptOcrService {
       // 行内テキストを結合して除外チェック
       final lineText = line.map((t) => t.text.trim()).join(' ');
 
-      // 除外キーワードのみの行はスキップ
-      if (totalExcludeKeywords.any((kw) => lineText.contains(kw)) &&
-          !totalLabelRules.any((r) => lineText.contains(r.pattern))) {
-        continue;
-      }
-
-      // この行で最高 weight のラベルを含むトークンを検索
+      // この行で最高 weight のラベルを検索（正規化 + トークン結合対応）
       OcrToken? labelToken;
       TotalLabelRule? lineRule;
+
+      // 1. 個別トークンからラベルを探す
       for (final token in line) {
         final text = token.text.trim();
         final rule = _findBestLabelRule(text);
@@ -717,6 +792,30 @@ class ReceiptOcrService {
           lineRule = rule;
           labelToken = token;
         }
+      }
+
+      // 2. 個別トークンで見つからない場合、行結合テキストから探す
+      //    （例: `合` + `計` が別トークンのケース）
+      if (lineRule == null) {
+        final joinedRule = _findBestLabelRule(lineText);
+        if (joinedRule != null) {
+          lineRule = joinedRule;
+          // ラベルパターンの末尾文字を含む最後のトークンを labelToken とする
+          // 例: pattern=`合計` → `計` を含むトークンがラベル末尾
+          final lastChar = joinedRule.pattern[joinedRule.pattern.length - 1];
+          for (final t in line) {
+            if (t.text.contains(lastChar)) {
+              labelToken = t;
+            }
+          }
+          labelToken ??= line.first;
+        }
+      }
+
+      // 除外キーワードのみの行はスキップ（ラベルがあれば除外しない）
+      if (totalExcludeKeywords.any((kw) => lineText.contains(kw)) &&
+          lineRule == null) {
+        continue;
       }
       if (labelToken == null || lineRule == null) continue;
 
@@ -727,10 +826,17 @@ class ReceiptOcrService {
       // ラベル直後の部分文字列から金額を抽出（l→1+空白除去の結合問題を回避）
       final labelText = labelToken.text.trim();
       final tokenLabelIdx = labelText.indexOf(lineRule.pattern);
+      final int afterTokenLabelIdx;
       if (tokenLabelIdx >= 0) {
-        final afterTokenLabel = labelText.substring(
-          tokenLabelIdx + lineRule.pattern.length,
+        afterTokenLabelIdx = tokenLabelIdx + lineRule.pattern.length;
+      } else {
+        // 正規化経由でマッチ（例: `合 計 ¥334`）
+        afterTokenLabelIdx = _findLabelEndInOriginal(
+          labelText, lineRule.pattern,
         );
+      }
+      if (afterTokenLabelIdx < labelText.length) {
+        final afterTokenLabel = labelText.substring(afterTokenLabelIdx);
         final labelCandidates = extractAmountCandidates(afterTokenLabel);
         if (labelCandidates.isNotEmpty) {
           final best = labelCandidates.reduce(

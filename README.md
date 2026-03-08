@@ -416,7 +416,48 @@ flutter build web # Webビルド
 - マジックバイト判定: JPEG (FF D8), PNG (89 50 4E 47), HEIC/HEIF (ftyp ボックス)
 - mimeType ヒントによるフォールバック判定
 
-### 確認手順
+## サンプル起点精度改善 (Step 19)
+
+### 画像品質緩和
+- **モバイル**: ImagePicker の初期圧縮（imageQuality: 85）を撤廃
+  - 長辺上限を 4096px に緩和（OOM 防止の安全上限のみ）
+  - 最終的なリサイズ・品質管理は ReceiptImagePreprocessor に委譲
+  - 二重圧縮（ImagePicker + Preprocessor）の解消により細文字の認識率向上
+
+### ラベル正規化
+- 空白分断ラベルの自動結合: `合 計` → `合計`
+- 全角空白・タブも除去対象
+- bbox 版ではトークン結合による検出もサポート: `合` + `計` → `合計`
+
+### fallback 除外強化
+- 追加した除外キーワード: `支払`, `PayPay`, `税率`, `対象`, `内消費税`, `電子マネー`, `カード`, `現金`
+- これにより `PayPay支払 ¥670` や `税率 8%対象 ¥667` が合計として誤採用されにくくなる
+
+### 簡易レシート領域 crop
+- 前処理後の JPEG を `image` パッケージでデコードし、行/列の平均輝度からコンテンツ領域を検出
+- レシート（白い紙）と背景（暗い面）の輝度差を利用して自動 crop
+- crop 結果が元画像の 15% 未満、または 95% 超の場合はスキップ（フォールバック）
+- crop 前後のサイズがログに出力される
+
+### 観測ログ
+- pick 後: format, bytes, dims（width x height）
+- preprocess 後: format, bytes, dims, converted, applied steps
+- OCR 後: token count
+- 抽出結果: merchant, total, confidence
+- ラベル候補検出時: label, weight, amount, line
+
+### サンプル確認手順（IMG_1783.HEIC）
+1. `docs/sample/IMG_1783.HEIC` を実機で用意する
+2. アプリの支出追加画面で「レシート読み取り」→ サンプル画像を選択
+3. 合計金額が `¥670` として抽出されることを確認
+4. デバッグログで以下を確認:
+   - `ReceiptOcrService: pick後` に format=heic, dims=WxH が出力される
+   - `ReceiptOcrService: preprocess後` に format=jpeg, dims=WxH, converted=true が出力される
+   - `MobileImagePreprocessor: crop` に crop 前後のサイズが出力される
+   - `ReceiptOcrService: ラベル候補` に label="合計" amount=670 が出力される
+5. crop 前後で OCR 結果を比較し、レシート本体の占有率向上を確認する
+
+### Step 19 確認手順
 ```bash
 flutter analyze   # 静的解析
 flutter test      # 全テスト
