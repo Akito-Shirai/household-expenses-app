@@ -562,6 +562,321 @@ void main() {
     });
   });
 
+  // ─── Step17: ラベル起点合計抽出 回帰テスト ───
+
+  group('合計ラベルペア抽出: テキスト行ベース', () {
+    test('小計+税+合計 混在: 合計の金額が採用される', () {
+      final result = ReceiptOcrService.extractTotal([
+        '小計 310',
+        '消費税 24',
+        '合計 334',
+        'お釣り 166',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 334);
+    });
+
+    test('ご請求額 が優先ラベルとして機能する', () {
+      final result = ReceiptOcrService.extractTotal([
+        '小計 2,800',
+        '消費税 116',
+        'ご請求額 2,916',
+        'お支払 3,000',
+        'お釣り 84',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 2916);
+    });
+
+    test('利用金額 ¥1,580 が抽出される', () {
+      final result = ReceiptOcrService.extractTotal([
+        '利用金額 ¥1,580',
+        'ポイント +15P',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 1580);
+    });
+
+    test('TOTAL 1,234 が抽出される', () {
+      final result = ReceiptOcrService.extractTotal([
+        'TOTAL 1,234',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 1234);
+    });
+
+    test('OCR 誤認: 合計 ¥3O4 → 304 に正規化される', () {
+      final result = ReceiptOcrService.extractTotal([
+        '合計 ¥3O4',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 304);
+    });
+
+    test('合計ラベルなし: フォールバックで金額が取れる', () {
+      final result = ReceiptOcrService.extractTotal([
+        '牛乳 ¥198',
+        'パン ¥128',
+        '¥326',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 326);
+    });
+
+    test('H-1: ご請求額+お支払が1行に結合 → ラベル直後の金額を返す', () {
+      final result = ReceiptOcrService.extractTotal([
+        'ご請求額 2,916 お支払 3,000',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 2916);
+    });
+
+    test('H-1: 合計+お釣りが1行に結合 → ラベル直後の金額を返す', () {
+      final result = ReceiptOcrService.extractTotal([
+        '合計 334 お釣り 166',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 334);
+    });
+
+    test('H-2: 税込 単独は優先ラベルとして扱わない', () {
+      final result = ReceiptOcrService.extractTotal([
+        'お茶 税込 108',
+        '小計 108',
+      ]);
+      // 税込単独行が即採用されない（フォールバック経路で取れる可能性はある）
+      expect(result == null || result.value == 108, isTrue);
+      // Phase 1 スコア（2.0）ではないことを確認
+      if (result != null) {
+        expect(result.score < 2.0, isTrue);
+      }
+    });
+
+    test('H-2: 税込合計 は合計キーワード経由で機能する', () {
+      final result = ReceiptOcrService.extractTotal([
+        '税込合計 1,580',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 1580);
+      expect(result.score, 2.0); // ラベル行スコア
+    });
+
+    test('H-2: 合計(税込) は合計キーワード経由で機能する', () {
+      final result = ReceiptOcrService.extractTotal([
+        '合計(税込) 1,580',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 1580);
+      expect(result.score, 2.0); // ラベル行スコア
+    });
+  });
+
+  group('合計ラベルペア抽出: bbox 版', () {
+    test('小計+合計+お釣り 混在: 合計ラベル右側の金額が採用される', () {
+      final tokens = [
+        OcrToken(
+          text: '小計',
+          bbox: const OcrBoundingBox(x: 10, y: 200, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '¥310',
+          bbox: const OcrBoundingBox(x: 200, y: 200, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '合計',
+          bbox: const OcrBoundingBox(x: 10, y: 240, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '¥334',
+          bbox: const OcrBoundingBox(x: 200, y: 240, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: 'お釣り',
+          bbox: const OcrBoundingBox(x: 10, y: 280, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '¥166',
+          bbox: const OcrBoundingBox(x: 200, y: 280, width: 60, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractTotalFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 334);
+    });
+
+    test('ご請求額 と金額が同一行の別トークン', () {
+      final tokens = [
+        OcrToken(
+          text: 'ご請求額',
+          bbox: const OcrBoundingBox(x: 10, y: 300, width: 80, height: 20),
+        ),
+        OcrToken(
+          text: '¥2,916',
+          bbox: const OcrBoundingBox(x: 200, y: 300, width: 80, height: 20),
+        ),
+        OcrToken(
+          text: 'お支払',
+          bbox: const OcrBoundingBox(x: 10, y: 340, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '¥3,000',
+          bbox: const OcrBoundingBox(x: 200, y: 340, width: 80, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractTotalFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 2916);
+    });
+
+    test('合計 ラベルと金額が同一トークン内（合計 ¥334）', () {
+      final tokens = [
+        OcrToken(
+          text: '合計 ¥334',
+          bbox: const OcrBoundingBox(x: 10, y: 200, width: 200, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractTotalFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 334);
+    });
+
+    test('TOTAL と金額が同一行', () {
+      final tokens = [
+        OcrToken(
+          text: 'TOTAL',
+          bbox: const OcrBoundingBox(x: 10, y: 400, width: 80, height: 20),
+        ),
+        OcrToken(
+          text: '1,234',
+          bbox: const OcrBoundingBox(x: 200, y: 400, width: 60, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractTotalFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 1234);
+    });
+
+    test('H-1: 合計+お釣り が同一トークン内 → ラベル直後の金額を返す', () {
+      final tokens = [
+        OcrToken(
+          text: '合計 334 お釣り 166',
+          bbox: const OcrBoundingBox(x: 10, y: 200, width: 300, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractTotalFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 334);
+    });
+
+    test('token 分断: 合 + 計 + ¥334（ラベルが分割されたケース）', () {
+      // 「合」「計」が別トークンの場合、結合テキストに合計が含まれる行を検出
+      // 現状の実装では個別トークンに「合計」が含まれないためフォールバック経路
+      final tokens = [
+        OcrToken(
+          text: '合',
+          bbox: const OcrBoundingBox(x: 10, y: 200, width: 20, height: 20),
+        ),
+        OcrToken(
+          text: '計',
+          bbox: const OcrBoundingBox(x: 35, y: 200, width: 20, height: 20),
+        ),
+        OcrToken(
+          text: '¥334',
+          bbox: const OcrBoundingBox(x: 200, y: 200, width: 60, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractTotalFromTokens(tokens);
+      expect(result, isNotNull);
+      // フォールバック経路でも金額自体は取れる
+      expect(result!.value, 334);
+    });
+  });
+
+  group('行グルーピング', () {
+    test('Y座標近接のトークンが同一行にグルーピングされる', () {
+      final tokens = [
+        OcrToken(
+          text: '合計',
+          bbox: const OcrBoundingBox(x: 10, y: 100, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '¥334',
+          bbox: const OcrBoundingBox(x: 200, y: 102, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: 'お釣り',
+          bbox: const OcrBoundingBox(x: 10, y: 150, width: 60, height: 20),
+        ),
+      ];
+      final lines = ReceiptOcrService.groupTokensIntoLines(tokens, 30.0);
+      expect(lines.length, 2);
+      expect(lines[0].length, 2); // 合計 + ¥334
+      expect(lines[1].length, 1); // お釣り
+    });
+
+    test('X座標でソートされる', () {
+      final tokens = [
+        OcrToken(
+          text: '¥334',
+          bbox: const OcrBoundingBox(x: 200, y: 100, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '合計',
+          bbox: const OcrBoundingBox(x: 10, y: 100, width: 60, height: 20),
+        ),
+      ];
+      final lines = ReceiptOcrService.groupTokensIntoLines(tokens, 30.0);
+      expect(lines.length, 1);
+      expect(lines[0][0].text, '合計');
+      expect(lines[0][1].text, '¥334');
+    });
+  });
+
+  group('OCR 誤認正規化', () {
+    test('O → 0 に正規化される', () {
+      expect(ReceiptOcrService.normalizeAmountText('3O4'), '304');
+    });
+
+    test('I → 1 に正規化される', () {
+      expect(ReceiptOcrService.normalizeAmountText('I,234'), '1,234');
+    });
+
+    test('l → 1 に正規化される', () {
+      expect(ReceiptOcrService.normalizeAmountText('l,580'), '1,580');
+    });
+
+    test('正常な数字はそのまま', () {
+      expect(ReceiptOcrService.normalizeAmountText('1,234'), '1,234');
+    });
+
+    test('空白と重複カンマが整理される', () {
+      expect(ReceiptOcrService.normalizeAmountText('1,,234'), '1,234');
+      expect(ReceiptOcrService.normalizeAmountText('1 234'), '1234');
+    });
+  });
+
+  group('金額候補抽出', () {
+    test('¥記号付き金額が抽出される', () {
+      final candidates =
+          ReceiptOcrService.extractAmountCandidates('¥1,234');
+      expect(candidates.length, 1);
+      expect(candidates[0].$1, 1234);
+    });
+
+    test('OCR 誤認付き金額が正規化されて抽出される', () {
+      final candidates =
+          ReceiptOcrService.extractAmountCandidates('¥3O4');
+      expect(candidates.length, 1);
+      expect(candidates[0].$1, 304);
+    });
+
+    test('100万超は除外される', () {
+      final candidates =
+          ReceiptOcrService.extractAmountCandidates('¥1,500,000');
+      expect(candidates, isEmpty);
+    });
+  });
+
   // ─── PickImageStatus / PickImageResult テスト ───
 
   group('PickImageStatus 新種別', () {

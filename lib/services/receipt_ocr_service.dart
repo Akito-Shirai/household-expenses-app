@@ -149,8 +149,11 @@ class ReceiptOcrService {
   ];
 
   /// 合計金額の優先キーワード
+  ///
+  /// 「税込」は単独では商品行（例: 「お茶 税込 108」）に誤マッチするため除外。
+  /// 「税込合計」「合計(税込)」は「合計」でマッチする。
   static const List<String> totalPriorityKeywords = [
-    '合計', 'ご請求', 'お会計', '税込',
+    '合計', 'ご請求', 'お会計',
     '請求額', '決済額', '利用金額', 'TOTAL', 'Total',
   ];
 
@@ -338,73 +341,139 @@ class ReceiptOcrService {
     return ScoredResult(bestCandidate, bestScore);
   }
 
-  // ─── 合計金額抽出 ───
+  // ─── 金額候補の OCR 誤認正規化 ───
 
-  /// キーワード＋正規表現で合計金額を抽出
+  /// 金額候補文字列の軽微な OCR 誤認を補正する
+  ///
+  /// ラベル文字列には適用しない（金額候補のみ）。
+  @visibleForTesting
+  static String normalizeAmountText(String text) {
+    return text
+        .replaceAll('O', '0')
+        .replaceAll('o', '0')
+        .replaceAll('I', '1')
+        .replaceAll('l', '1')
+        .replaceAll(' ', '')
+        .replaceAll(',,', ',');
+  }
+
+  /// 金額正規表現（正規化済み文字列に適用）
+  static final RegExp _amountRegex =
+      RegExp(r'[¥￥]\s*([0-9,]+)|([0-9,]+)\s*円|([0-9,]{3,})');
+
+  /// 文字列から金額候補を抽出（OCR 誤認正規化付き）
+  ///
+  /// 返り値は `(金額, 文字列内での出現位置)` のリスト。
+  @visibleForTesting
+  static List<(int amount, int position)> extractAmountCandidates(
+    String text,
+  ) {
+    final normalized = normalizeAmountText(text);
+    final results = <(int, int)>[];
+    for (final match in _amountRegex.allMatches(normalized)) {
+      final amountStr =
+          (match.group(1) ?? match.group(2) ?? match.group(3))
+              ?.replaceAll(',', '');
+      if (amountStr == null || amountStr.isEmpty) continue;
+      final amount = int.tryParse(amountStr);
+      if (amount == null || amount <= 0 || amount > 1000000) continue;
+      results.add((amount, match.start));
+    }
+    return results;
+  }
+
+  /// ラベルキーワード直後の最も近い金額候補を選ぶ
+  ///
+  /// [candidates] は `extractAmountCandidates()` の結果。
+  /// [normalizedText] は `normalizeAmountText()` 適用済みの行テキスト。
+  /// ラベル末尾位置以降で最も近い金額を優先し、なければ全候補から最近を返す。
+  static (int amount, int position) _pickClosestToLabel(
+    List<(int amount, int position)> candidates,
+    String normalizedText,
+  ) {
+    // ラベルキーワードの末尾位置を特定
+    int labelEnd = 0;
+    for (final kw in totalPriorityKeywords) {
+      final idx = normalizedText.indexOf(kw);
+      if (idx >= 0) {
+        final end = idx + kw.length;
+        if (end > labelEnd) labelEnd = end;
+      }
+    }
+
+    // ラベル直後の最も近い金額を優先
+    final afterLabel = candidates.where((c) => c.$2 >= labelEnd).toList();
+    if (afterLabel.isNotEmpty) {
+      return afterLabel.reduce((a, b) => a.$2 < b.$2 ? a : b);
+    }
+    // ラベル後にない場合は全候補から最もラベルに近いものを選ぶ
+    return candidates.reduce(
+      (a, b) =>
+          (a.$2 - labelEnd).abs() < (b.$2 - labelEnd).abs() ? a : b,
+    );
+  }
+
+  // ─── 合計金額抽出（テキスト行ベース） ───
+
+  /// 合計ラベル起点で金額を抽出（bbox なし経路）
+  ///
+  /// 1. 合計ラベルを含む行の行末金額を最優先
+  /// 2. ラベル行が見つからない場合のみ、全行から補助的に候補を探す
   @visibleForTesting
   static ScoredResult<int>? extractTotal(List<String> lines) {
-    final amountRegex = RegExp(r'[¥￥]\s*([0-9,]+)|([0-9,]+)\s*円|([0-9,]{3,})');
+    // ── Phase 1: 合計ラベル行の行末金額を探す ──
+    for (int i = 0; i < lines.length; i++) {
+      final line = lines[i];
 
+      // 除外キーワードのみの行はスキップ
+      if (totalExcludeKeywords.any((kw) => line.contains(kw)) &&
+          !totalPriorityKeywords.any((kw) => line.contains(kw))) {
+        continue;
+      }
+
+      // 合計ラベルがあるか
+      if (!totalPriorityKeywords.any((kw) => line.contains(kw))) continue;
+
+      // この行から金額候補を抽出
+      final candidates = extractAmountCandidates(line);
+      if (candidates.isEmpty) continue;
+
+      // ラベル直後の最も近い金額を優先
+      final normalizedLine = normalizeAmountText(line);
+      final best = _pickClosestToLabel(candidates, normalizedLine);
+      // ラベル行の金額は高スコア（2.0 基準）
+      return ScoredResult(best.$1, 2.0);
+    }
+
+    // ── Phase 2: フォールバック（ラベル行なし → 補助的候補探索） ──
     double bestScore = -1;
     int? bestAmount;
 
     for (int i = 0; i < lines.length; i++) {
       final line = lines[i];
 
-      // 除外キーワードを含む行はスキップ
+      // 除外行チェック
       if (totalExcludeKeywords.any((kw) => line.contains(kw))) continue;
-
-      // 日付行はスキップ（金額との誤認防止）
-      if (_datePattern.hasMatch(line) &&
-          !totalPriorityKeywords.any((kw) => line.contains(kw))) {
-        continue;
-      }
-
-      // 和暦日付行はスキップ
-      if (_warekiPattern.hasMatch(line) &&
-          !totalPriorityKeywords.any((kw) => line.contains(kw))) {
-        continue;
-      }
-
-      // 連番（10桁以上）のみの行はスキップ（レシート番号等）
+      if (_datePattern.hasMatch(line)) continue;
+      if (_warekiPattern.hasMatch(line)) continue;
       if (_serialNumberPattern.hasMatch(line) &&
           !line.contains('¥') &&
           !line.contains('￥') &&
           !line.contains('円')) {
-        // 金額記号がなく連番が含まれる → 注文番号等の可能性
         final serialMatch = _serialNumberPattern.firstMatch(line);
         if (serialMatch != null &&
-            serialMatch.group(0)!.length == line.replaceAll(RegExp(r'\s'), '').length) {
+            serialMatch.group(0)!.length ==
+                line.replaceAll(RegExp(r'\s'), '').length) {
           continue;
         }
       }
 
-      // 優先キーワードの有無
-      final hasPriorityKeyword =
-          totalPriorityKeywords.any((kw) => line.contains(kw));
-
-      // 金額を抽出
-      final matches = amountRegex.allMatches(line);
-      for (final match in matches) {
-        final amountStr =
-            (match.group(1) ?? match.group(2) ?? match.group(3))
-                ?.replaceAll(',', '');
-        if (amountStr == null || amountStr.isEmpty) continue;
-
-        final amount = int.tryParse(amountStr);
-        if (amount == null || amount <= 0) continue;
-        if (amount > 1000000) continue;
-
+      final candidates = extractAmountCandidates(line);
+      for (final (amount, _) in candidates) {
+        // フォールバックは低スコア（文書下部 + 金額規模のみ）
         double score = 0;
-
-        // 優先キーワード近傍
-        if (hasPriorityKeyword) score += 1.0;
-
-        // 文書下部ほどスコア加算
-        score += i / lines.length * 0.5;
-
-        // 金額規模ボーナス
-        score += (amount / 100000).clamp(0, 0.3);
+        score += i / lines.length * 0.3;
+        score += (amount / 100000).clamp(0, 0.2);
 
         if (score > bestScore) {
           bestScore = score;
@@ -522,103 +591,153 @@ class ReceiptOcrService {
 
   // ─── bbox版 合計金額抽出 ───
 
-  /// bbox 情報を活用した合計金額抽出
+  /// token を Y 座標で擬似行にグルーピングする
   ///
-  /// - 優先キーワードと同一行（近い Y 座標）の金額を最優先
-  /// - 右側近傍の金額を第2優先
+  /// Y 座標の差が [threshold] 以内のトークンを同一行とみなす。
+  /// 各行内のトークンは X 座標昇順でソートされる。
+  @visibleForTesting
+  static List<List<OcrToken>> groupTokensIntoLines(
+    List<OcrToken> tokens,
+    double threshold,
+  ) {
+    if (tokens.isEmpty) return [];
+
+    // Y 座標でソート
+    final sorted = List<OcrToken>.from(tokens)
+      ..sort((a, b) => a.bbox!.y.compareTo(b.bbox!.y));
+
+    final lines = <List<OcrToken>>[];
+    var currentLine = <OcrToken>[sorted.first];
+    double currentY = sorted.first.bbox!.y;
+
+    for (int i = 1; i < sorted.length; i++) {
+      final token = sorted[i];
+      if ((token.bbox!.y - currentY).abs() <= threshold) {
+        currentLine.add(token);
+      } else {
+        // X 座標でソートして行を確定
+        currentLine.sort((a, b) => a.bbox!.x.compareTo(b.bbox!.x));
+        lines.add(currentLine);
+        currentLine = [token];
+        currentY = token.bbox!.y;
+      }
+    }
+    // 最後の行を追加
+    currentLine.sort((a, b) => a.bbox!.x.compareTo(b.bbox!.x));
+    lines.add(currentLine);
+
+    return lines;
+  }
+
+  /// bbox 情報を活用した合計金額抽出（ラベル起点ペア探索）
+  ///
+  /// 1. token を擬似行にグルーピング
+  /// 2. 各行で合計ラベルを探し、同一行右側の金額を最優先で採用
+  /// 3. ラベル行が見つからない場合は補助的フォールバック
   @visibleForTesting
   static ScoredResult<int>? extractTotalFromTokens(List<OcrToken> tokens) {
-    final amountRegex =
-        RegExp(r'[¥￥]\s*([0-9,]+)|([0-9,]+)\s*円|([0-9,]{3,})');
-
-    // Y座標の近さで「同一行」を判定するための閾値
-    // 各トークンの高さの平均を基準にする
     final bboxTokens = tokens.where((t) => t.bbox != null).toList();
     if (bboxTokens.isEmpty) {
       // bbox なし → テキストベースにフォールバック
-      final lines = tokens.map((t) => t.text.trim()).where((t) => t.isNotEmpty).toList();
+      final lines =
+          tokens.map((t) => t.text.trim()).where((t) => t.isNotEmpty).toList();
       return extractTotal(lines);
     }
 
+    // 平均トークン高さを算出（行グルーピング閾値の基準）
     double avgHeight = 0;
     for (final t in bboxTokens) {
       avgHeight += t.bbox!.height;
     }
     avgHeight /= bboxTokens.length;
-    // 同一行判定: Y座標の差が平均高さの1.5倍以内
     final sameLineThreshold = avgHeight * 1.5;
 
-    // 優先キーワードを含むトークンを検索
-    final keywordTokens = bboxTokens.where((t) =>
-        totalPriorityKeywords.any((kw) => t.text.contains(kw)) &&
-        !totalExcludeKeywords.any((kw) => t.text.contains(kw))).toList();
+    // token を擬似行にグルーピング
+    final pseudoLines = groupTokensIntoLines(bboxTokens, sameLineThreshold);
 
+    // ── Phase 1: 合計ラベル行の右側金額を探す ──
+    ScoredResult<int>? bestLabelResult;
+    double bestLabelScore = -1;
+
+    for (final line in pseudoLines) {
+      // 行内テキストを結合して除外チェック
+      final lineText = line.map((t) => t.text.trim()).join(' ');
+
+      // 除外キーワードのみの行はスキップ
+      if (totalExcludeKeywords.any((kw) => lineText.contains(kw)) &&
+          !totalPriorityKeywords.any((kw) => lineText.contains(kw))) {
+        continue;
+      }
+
+      // 合計ラベルを含むトークンを検索
+      OcrToken? labelToken;
+      for (final token in line) {
+        final text = token.text.trim();
+        if (totalPriorityKeywords.any((kw) => text.contains(kw))) {
+          labelToken = token;
+          break;
+        }
+      }
+      if (labelToken == null) continue;
+
+      // ラベルトークン自体に金額が含まれるケース（例: 「合計 ¥334」）
+      final labelCandidates = extractAmountCandidates(labelToken.text);
+      if (labelCandidates.isNotEmpty) {
+        // ラベル直後の最も近い金額を優先
+        final normalizedLabel = normalizeAmountText(labelToken.text);
+        final best = _pickClosestToLabel(labelCandidates, normalizedLabel);
+        const score = 3.0; // ラベル内金額は最高スコア
+        if (score > bestLabelScore) {
+          bestLabelScore = score;
+          bestLabelResult = ScoredResult(best.$1, score);
+        }
+      }
+
+      // ラベルの右側にある金額トークンを探す
+      for (final token in line) {
+        if (token.bbox!.x <= labelToken.bbox!.x) continue;
+        final text = token.text.trim();
+        if (totalExcludeKeywords.any((kw) => text.contains(kw))) continue;
+
+        final candidates = extractAmountCandidates(text);
+        for (final (amount, _) in candidates) {
+          // スコア: 同一行右側（2.5）+ ラベルとの近さ
+          final xDist = token.bbox!.x - labelToken.bbox!.x;
+          final proximityBonus =
+              (1.0 / (1.0 + xDist / 100.0)).clamp(0.0, 0.5);
+          final score = 2.5 + proximityBonus;
+          if (score > bestLabelScore) {
+            bestLabelScore = score;
+            bestLabelResult = ScoredResult(amount, score);
+          }
+        }
+      }
+    }
+
+    if (bestLabelResult != null) return bestLabelResult;
+
+    // ── Phase 2: フォールバック（ラベル行なし → 全行から補助的候補） ──
     double bestScore = -1;
     int? bestAmount;
 
-    for (final token in bboxTokens) {
-      final text = token.text.trim();
+    for (int lineIdx = 0; lineIdx < pseudoLines.length; lineIdx++) {
+      final line = pseudoLines[lineIdx];
+      final lineText = line.map((t) => t.text.trim()).join(' ');
 
-      // 除外チェック
-      if (totalExcludeKeywords.any((kw) => text.contains(kw))) continue;
-      if (_datePattern.hasMatch(text) &&
-          !totalPriorityKeywords.any((kw) => text.contains(kw))) {
-        continue;
-      }
-      if (_warekiPattern.hasMatch(text)) continue;
-      if (_serialNumberPattern.hasMatch(text) &&
-          !text.contains('¥') && !text.contains('￥') && !text.contains('円')) {
-        final serialMatch = _serialNumberPattern.firstMatch(text);
-        if (serialMatch != null &&
-            serialMatch.group(0)!.length == text.replaceAll(RegExp(r'\s'), '').length) {
-          continue;
-        }
-      }
+      if (totalExcludeKeywords.any((kw) => lineText.contains(kw))) continue;
+      if (_datePattern.hasMatch(lineText)) continue;
+      if (_warekiPattern.hasMatch(lineText)) continue;
 
-      // 金額を抽出
-      final matches = amountRegex.allMatches(text);
-      for (final match in matches) {
-        final amountStr =
-            (match.group(1) ?? match.group(2) ?? match.group(3))
-                ?.replaceAll(',', '');
-        if (amountStr == null || amountStr.isEmpty) continue;
-
-        final amount = int.tryParse(amountStr);
-        if (amount == null || amount <= 0 || amount > 1000000) continue;
-
-        double score = 0;
-
-        // 同一テキスト内に優先キーワードがある場合
-        if (totalPriorityKeywords.any((kw) => text.contains(kw))) {
-          score += 2.0;
-        }
-
-        // 近傍の優先キーワードトークンとの位置関係
-        if (token.bbox != null) {
-          for (final kwToken in keywordTokens) {
-            final yDiff = (token.bbox!.y - kwToken.bbox!.y).abs();
-            if (yDiff < sameLineThreshold) {
-              // 同一行のキーワード近傍
-              score += 1.5;
-              // キーワードの右側にある金額をさらに優先
-              if (token.bbox!.x > kwToken.bbox!.x) {
-                score += 0.3;
-              }
-              break;
-            }
+      for (final token in line) {
+        final candidates = extractAmountCandidates(token.text);
+        for (final (amount, _) in candidates) {
+          double score = 0;
+          score += lineIdx / pseudoLines.length * 0.3;
+          score += (amount / 100000).clamp(0, 0.2);
+          if (score > bestScore) {
+            bestScore = score;
+            bestAmount = amount;
           }
-        }
-
-        // 文書下部ボーナス
-        final tokenIndex = bboxTokens.indexOf(token);
-        score += tokenIndex / bboxTokens.length * 0.5;
-
-        // 金額規模ボーナス
-        score += (amount / 100000).clamp(0, 0.3);
-
-        if (score > bestScore) {
-          bestScore = score;
-          bestAmount = amount;
         }
       }
     }
