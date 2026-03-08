@@ -5,8 +5,11 @@ import 'package:image_picker/image_picker.dart';
 import '../receipt_ocr_service.dart';
 import 'image_pick_adapter.dart';
 
-/// 画像長辺の上限（リサイズ用）
-const int _maxImageDimension = 2048;
+/// 画像長辺の上限（OOM 防止用の安全上限）
+///
+/// OCR 品質を確保するため大きめに設定し、最終的なリサイズは
+/// ReceiptImagePreprocessor に委ねる（二重圧縮の回避）。
+const int _maxImageDimension = 4096;
 
 /// Mobile向け画像取得アダプタ（ImagePicker + 権限チェック）
 class MobileImagePickAdapter implements ImagePickAdapter {
@@ -14,11 +17,12 @@ class MobileImagePickAdapter implements ImagePickAdapter {
   Future<PickImageResult> pickImage(ImageSource source) async {
     try {
       final picker = ImagePicker();
+      // imageQuality を指定しない → ImagePicker による再圧縮を回避し
+      // 元画像に近い品質で ReceiptImagePreprocessor へ渡す
       final xFile = await picker.pickImage(
         source: source,
         maxWidth: _maxImageDimension.toDouble(),
         maxHeight: _maxImageDimension.toDouble(),
-        imageQuality: 85,
       );
       if (xFile == null) {
         return const PickImageResult(PickImageStatus.canceled);
