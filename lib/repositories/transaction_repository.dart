@@ -140,6 +140,43 @@ class TransactionRepository {
         .eq('user_id', _userId);
   }
 
+  /// skip 例外の upsert ペイロードを構築する（テスト可能な純粋関数）
+  static Map<String, dynamic> buildSkipExceptionPayload({
+    required String recurringRuleId,
+    required DateTime scheduledFor,
+  }) {
+    return {
+      'recurring_rule_id': recurringRuleId,
+      'scheduled_for': scheduledFor.toIso8601String().substring(0, 10),
+      'exception_type': 'skip',
+    };
+  }
+
+  /// skip 例外 upsert で使用する onConflict 列指定
+  static const skipExceptionConflictColumns = 'recurring_rule_id,scheduled_for';
+
+  /// 定期支出から生成された取引を削除し、skip例外を登録して再生成を防止
+  Future<void> deleteRecurring(
+    String id, {
+    required String recurringRuleId,
+    required DateTime scheduledFor,
+  }) async {
+    // skip例外を登録（upsertで再試行安全：既に存在しても成功する）
+    await _client.from('recurring_rule_exceptions').upsert(
+      buildSkipExceptionPayload(
+        recurringRuleId: recurringRuleId,
+        scheduledFor: scheduledFor,
+      ),
+      onConflict: skipExceptionConflictColumns,
+    );
+    // 取引を削除
+    await _client
+        .from('transactions')
+        .delete()
+        .eq('id', id)
+        .eq('user_id', _userId);
+  }
+
   /// 取引リストから月次サマリーを集計する（純粋関数）
   static MonthlySummary summarize(List<Transaction> transactions) {
     int totalExpense = 0;

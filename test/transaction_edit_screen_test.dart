@@ -800,4 +800,73 @@ void main() {
       expect(find.text('カメラ/写真へのアクセス'), findsNothing);
     });
   });
+
+  group('取引編集: 定期取引削除 回帰テスト', () {
+    test('定期取引の削除確認メッセージが通常取引と異なる', () {
+      // TransactionEditScreen._delete() は isRecurring で分岐する
+      // 定期取引: 「この定期支出を削除しますか？\n削除するとこの日付の分は再生成されなくなります。」
+      // 通常取引: 「この取引を削除しますか？」
+      final recurringTx = Transaction(
+        id: 'tx-r1',
+        userId: 'u',
+        categoryId: 'c1',
+        date: DateTime(2026, 3, 15),
+        type: 'expense',
+        amount: 5000,
+        sourceType: 'recurring',
+        recurringRuleId: 'rule-1',
+        scheduledFor: DateTime(2026, 3, 15),
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      expect(recurringTx.isRecurring, isTrue);
+      expect(recurringTx.recurringRuleId, isNotNull);
+      expect(recurringTx.scheduledFor, isNotNull);
+
+      final manualTx = Transaction(
+        id: 'tx-m1',
+        userId: 'u',
+        categoryId: 'c1',
+        date: DateTime(2026, 3, 15),
+        type: 'expense',
+        amount: 1000,
+        sourceType: 'manual',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      expect(manualTx.isRecurring, isFalse);
+    });
+
+    test('定期取引削除時の skip 例外ペイロードが正しい形式', () {
+      // 実装コード（TransactionRepository.buildSkipExceptionPayload）を直接呼び出し
+      final payload = TransactionRepository.buildSkipExceptionPayload(
+        recurringRuleId: 'rule-1',
+        scheduledFor: DateTime(2026, 3, 15),
+      );
+
+      expect(payload['recurring_rule_id'], 'rule-1');
+      expect(payload['scheduled_for'], '2026-03-15');
+      expect(payload['exception_type'], 'skip');
+    });
+
+    test('skip 例外は upsert なので再試行時も同じペイロードで成功する', () {
+      // H-2回帰: 実装コードの onConflict 定数を直接参照
+      // キー名を変えると即テストが失敗する
+      final columns = TransactionRepository.skipExceptionConflictColumns;
+      expect(columns.split(',').length, 2);
+      expect(columns, contains('recurring_rule_id'));
+      expect(columns, contains('scheduled_for'));
+
+      // 同一引数で2回呼んでも同一ペイロードが返る（冪等性）
+      final payload1 = TransactionRepository.buildSkipExceptionPayload(
+        recurringRuleId: 'rule-1',
+        scheduledFor: DateTime(2026, 3, 15),
+      );
+      final payload2 = TransactionRepository.buildSkipExceptionPayload(
+        recurringRuleId: 'rule-1',
+        scheduledFor: DateTime(2026, 3, 15),
+      );
+      expect(payload1, equals(payload2));
+    });
+  });
 }

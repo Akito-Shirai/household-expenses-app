@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../main.dart';
 import '../models/transaction.dart' as model;
 import '../models/user_settings.dart';
+import '../repositories/recurring_rule_repository.dart';
 import '../repositories/transaction_repository.dart';
 import '../repositories/user_settings_repository.dart';
 import '../theme/app_theme.dart';
@@ -25,6 +26,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final _txRepo = TransactionRepository(supabase);
   final _settingsRepo = UserSettingsRepository(supabase);
+  final _recurringRepo = RecurringRuleRepository(supabase);
 
   late int _year;
   late int _month;
@@ -104,6 +106,8 @@ class _HomeScreenState extends State<HomeScreen> {
           settings.isLastRateStale) {
         _refreshRateInBackground(token, settings.displayCurrency);
       }
+      // 定期支出の未生成分を catch-up（fire-and-forget）
+      _runRecurringCatchup(token);
     } catch (e) {
       if (token != _loadToken || !mounted) return;
       // 認証系エラー（42501）はhandleErrorで処理（セッション切れ→サインアウト導線）
@@ -134,6 +138,23 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() => _userSettings = updated);
     } catch (e) {
       debugPrint('バックグラウンドレート更新エラー: $e');
+    }
+  }
+
+  /// 定期支出の未生成分を catch-up（fire-and-forget）
+  /// クライアントのローカル日付を渡してタイムゾーン差を解消
+  Future<void> _runRecurringCatchup(int token) async {
+    try {
+      final inserted = await _recurringRepo.runCatchup(
+        asOfDate: DateTime.now(),
+      );
+      if (token != _loadToken || !mounted) return;
+      if (inserted > 0) {
+        // 新規生成があれば再読み込み（2回目はinsert 0で無限ループしない）
+        _load();
+      }
+    } catch (e) {
+      debugPrint('定期支出キャッチアップエラー: $e');
     }
   }
 

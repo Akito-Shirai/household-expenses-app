@@ -9,6 +9,9 @@ class Transaction {
   final int quantity; // 個数（デフォルト1）
   final String? memo;
   final String type; // 'expense' or 'income'
+  final String sourceType; // 'manual' or 'recurring'
+  final String? recurringRuleId; // 定期支出ルールID（自動生成時のみ）
+  final DateTime? scheduledFor; // 定期支出の発生予定日（自動生成時のみ）
   final DateTime? expiredAt; // データ保持ポリシーによる期限切れ日時
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -26,6 +29,9 @@ class Transaction {
     this.quantity = 1,
     this.memo,
     required this.type,
+    this.sourceType = 'manual',
+    this.recurringRuleId,
+    this.scheduledFor,
     this.expiredAt,
     required this.createdAt,
     required this.updatedAt,
@@ -48,6 +54,11 @@ class Transaction {
       quantity: (json['quantity'] as num?)?.toInt() ?? 1,
       memo: json['memo'] as String?,
       type: json['type'] as String,
+      sourceType: json['source_type'] as String? ?? 'manual',
+      recurringRuleId: json['recurring_rule_id'] as String?,
+      scheduledFor: json['scheduled_for'] != null
+          ? DateTime.parse(json['scheduled_for'] as String)
+          : null,
       expiredAt: json['expired_at'] != null
           ? DateTime.parse(json['expired_at'] as String)
           : null,
@@ -71,6 +82,7 @@ class Transaction {
   }
 
   /// UPDATE用JSON
+  /// （source_type / recurring_rule_id / scheduled_for はDB/RPCが管理するため含めない）
   Map<String, dynamic> toUpdateJson() {
     return {
       'category_id': categoryId,
@@ -82,4 +94,7 @@ class Transaction {
       'type': type,
     };
   }
+
+  /// 定期支出から自動生成された取引かどうか
+  bool get isRecurring => sourceType == 'recurring';
 }

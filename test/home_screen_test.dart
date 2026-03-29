@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:household_mvp/models/transaction.dart';
+import 'package:household_mvp/repositories/recurring_rule_repository.dart';
 import 'package:household_mvp/repositories/transaction_repository.dart';
 import 'package:household_mvp/models/user_settings.dart';
 import 'package:household_mvp/utils/fx_converter.dart';
@@ -132,6 +133,102 @@ void main() {
       final settings = UserSettings.defaults('test');
       expect(settings.effectiveRate, isNull);
       expect(settings.displayCurrency, 'JPY');
+    });
+  });
+
+  group('ホーム画面: 定期支出キャッチアップ回帰', () {
+    test('catch-up で生成された定期取引がサマリーに正しく反映される', () {
+      // catch-up で生成される取引は source_type='recurring' だが
+      // summarize() は source_type を区別しない → 正しく集計される
+      final transactions = [
+        Transaction(
+          id: 'manual-1',
+          userId: 'u',
+          date: DateTime(2026, 3, 1),
+          type: 'expense',
+          amount: 1000,
+          categoryId: 'c1',
+          categoryName: '食費',
+          sourceType: 'manual',
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+        ),
+        Transaction(
+          id: 'recurring-1',
+          userId: 'u',
+          date: DateTime(2026, 3, 1),
+          type: 'expense',
+          amount: 5000,
+          categoryId: 'c2',
+          categoryName: '家賃',
+          sourceType: 'recurring',
+          recurringRuleId: 'rule-1',
+          scheduledFor: DateTime(2026, 3, 1),
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+        ),
+        Transaction(
+          id: 'recurring-2',
+          userId: 'u',
+          date: DateTime(2026, 3, 15),
+          type: 'expense',
+          amount: 1000,
+          categoryId: 'c3',
+          categoryName: 'サブスク',
+          sourceType: 'recurring',
+          recurringRuleId: 'rule-2',
+          scheduledFor: DateTime(2026, 3, 15),
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+        ),
+      ];
+
+      final summary = TransactionRepository.summarize(transactions);
+      expect(summary.totalExpense, 7000);
+      expect(summary.expenseByCategory['家賃'], 5000);
+      expect(summary.expenseByCategory['サブスク'], 1000);
+      expect(summary.expenseByCategory['食費'], 1000);
+    });
+
+    test('buildCatchupParams がローカル日付を正しく変換する（タイムゾーン回帰）', () {
+      // HomeScreen は DateTime.now() を buildCatchupParams に渡す
+      // 実装コードを直接呼び出して検証
+      final jstMidnight = DateTime(2026, 3, 29, 0, 30); // JST 0:30
+      final params = RecurringRuleRepository.buildCatchupParams(
+        asOfDate: jstMidnight,
+      );
+      expect(params['p_as_of_date'], '2026-03-29',
+          reason: 'ローカル DateTime からは常にローカル日付が取れる');
+    });
+
+    test('buildCatchupParams(null) は空 map を返し DB 側 CURRENT_DATE にフォールバック', () {
+      final params = RecurringRuleRepository.buildCatchupParams(asOfDate: null);
+      expect(params, isEmpty,
+          reason: 'null の場合 DB 側の CURRENT_DATE が使われる');
+    });
+
+    test('同一 recurring_rule_id + scheduled_for の取引は1件のみ存在する前提', () {
+      // DB側の部分一意インデックスにより保証。
+      // アプリ側では二重起票されないことを前提にサマリー計算する。
+      final transactions = [
+        Transaction(
+          id: 'dup-check',
+          userId: 'u',
+          date: DateTime(2026, 3, 1),
+          type: 'expense',
+          amount: 5000,
+          categoryId: 'c2',
+          categoryName: '家賃',
+          sourceType: 'recurring',
+          recurringRuleId: 'rule-1',
+          scheduledFor: DateTime(2026, 3, 1),
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+        ),
+      ];
+      final summary = TransactionRepository.summarize(transactions);
+      expect(summary.totalExpense, 5000,
+          reason: '同一ルール・日付の取引が1件のみならサマリーも1件分');
     });
   });
 }

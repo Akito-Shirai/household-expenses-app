@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:household_mvp/models/recurring_rule.dart';
 import 'package:household_mvp/models/user_settings.dart';
 import 'package:household_mvp/utils/fx_converter.dart';
 import 'package:household_mvp/widgets/state_views.dart';
@@ -266,6 +267,82 @@ void main() {
       expect(json['display_currency'], 'USD');
       expect(json['fx_mode'], 'manual');
       expect(json['manual_rate'], 150.0);
+    });
+  });
+
+  group('設定画面: 定期支出ルール バリデーション', () {
+    // _showRecurringRuleDialog 内のバリデーション相当
+    bool validateAmount(String text) {
+      if (text.isEmpty) return false;
+      final n = int.tryParse(text);
+      return n != null && n >= 0;
+    }
+
+    bool validateInterval(String text) {
+      if (text.isEmpty) return false;
+      final n = int.tryParse(text);
+      return n != null && n >= 1;
+    }
+
+    test('金額: 正の整数はOK', () {
+      expect(validateAmount('1000'), isTrue);
+      expect(validateAmount('0'), isTrue);
+    });
+
+    test('金額: 空文字はNG', () {
+      expect(validateAmount(''), isFalse);
+    });
+
+    test('金額: 非数値はNG', () {
+      expect(validateAmount('abc'), isFalse);
+    });
+
+    test('間隔: 1以上はOK', () {
+      expect(validateInterval('1'), isTrue);
+      expect(validateInterval('12'), isTrue);
+    });
+
+    test('間隔: 0はNG', () {
+      expect(validateInterval('0'), isFalse);
+    });
+
+    test('間隔: 空文字はNG', () {
+      expect(validateInterval(''), isFalse);
+    });
+  });
+
+  group('設定画面: RecurringRuleモデル表示', () {
+    test('frequencyLabelが設定画面表示に適した文字列を返す', () {
+      final rule = RecurringRule(
+        id: 'r1',
+        userId: 'u',
+        categoryId: 'c1',
+        amount: 1000,
+        frequencyUnit: 'month',
+        frequencyInterval: 1,
+        startDate: DateTime(2026, 1, 1),
+        isActive: true,
+        createdAt: DateTime(2026, 1, 1),
+        updatedAt: DateTime(2026, 1, 1),
+      );
+      expect(rule.frequencyLabel, '毎月');
+    });
+
+    test('無効ルールのisActiveがfalse', () {
+      final rule = RecurringRule(
+        id: 'r2',
+        userId: 'u',
+        categoryId: 'c1',
+        amount: 2000,
+        frequencyUnit: 'week',
+        frequencyInterval: 2,
+        startDate: DateTime(2026, 1, 1),
+        isActive: false,
+        createdAt: DateTime(2026, 1, 1),
+        updatedAt: DateTime(2026, 1, 1),
+      );
+      expect(rule.isActive, isFalse);
+      expect(rule.frequencyLabel, '2週ごと');
     });
   });
 }

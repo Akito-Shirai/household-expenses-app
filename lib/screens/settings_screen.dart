@@ -4,8 +4,10 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../main.dart';
 import '../models/category.dart';
+import '../models/recurring_rule.dart';
 import '../models/user_settings.dart';
 import '../repositories/category_repository.dart';
+import '../repositories/recurring_rule_repository.dart';
 import '../repositories/user_settings_repository.dart';
 import '../theme/app_theme.dart';
 import '../utils/error_handler.dart';
@@ -26,10 +28,12 @@ class _SettingsScreenState extends State<SettingsScreen>
   late final TabController _tabController;
   final _repo = CategoryRepository(supabase);
   final _settingsRepo = UserSettingsRepository(supabase);
+  final _recurringRepo = RecurringRuleRepository(supabase);
   final _rateController = TextEditingController();
 
   List<Category> _expenseCategories = [];
   List<Category> _incomeCategories = [];
+  List<RecurringRule> _recurringRules = [];
   String _selectedCurrency = 'JPY';
   String _selectedFxMode = 'manual';
   UserSettings? _currentSettings;
@@ -69,6 +73,7 @@ class _SettingsScreenState extends State<SettingsScreen>
     try {
       final expenses = await _repo.list('expense');
       final incomes = await _repo.list('income');
+      final rules = await _recurringRepo.listAll();
       UserSettings? settings;
       try {
         settings = await _settingsRepo.getOrCreate();
@@ -79,6 +84,7 @@ class _SettingsScreenState extends State<SettingsScreen>
         setState(() {
           _expenseCategories = expenses;
           _incomeCategories = incomes;
+          _recurringRules = rules;
           if (settings != null) {
             _selectedCurrency = settings.displayCurrency;
             _selectedFxMode = settings.fxMode;
@@ -525,7 +531,7 @@ class _SettingsScreenState extends State<SettingsScreen>
           );
         } else {
           final message = e.code == '23503'
-              ? 'このカテゴリを使用中の取引があるため削除できません'
+              ? 'このカテゴリを使用中の取引または定期支出ルールがあるため削除できません'
               : 'カテゴリの削除に失敗しました';
           ScaffoldMessenger.of(
             context,
@@ -539,6 +545,400 @@ class _SettingsScreenState extends State<SettingsScreen>
           error: e,
           debugLabel: 'カテゴリ削除エラー',
           userMessage: 'カテゴリの削除に失敗しました',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
+    }
+  }
+
+  // ─── 定期支出セクション ───
+
+  /// 定期支出管理セクション
+  Widget _buildRecurringSection() {
+    return Card(
+      margin: const EdgeInsets.symmetric(
+        horizontal: AppTheme.spacingMd,
+        vertical: AppTheme.spacingSm,
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(AppTheme.spacingMd),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.event_repeat,
+                  size: 20,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                const SizedBox(width: AppTheme.spacingSm),
+                Text(
+                  '定期支出',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                ),
+                const Spacer(),
+                IconButton(
+                  icon: const Icon(Icons.add_circle_outline),
+                  tooltip: '定期支出を追加',
+                  onPressed: _isSaving ? null : () => _showRecurringRuleDialog(),
+                ),
+              ],
+            ),
+            const SizedBox(height: AppTheme.spacingXs),
+            Text(
+              '定期的な支出を登録すると、ホーム表示時に自動で取引が作成されます。',
+              style: TextStyle(fontSize: 12, color: AppTheme.subtleText),
+            ),
+            if (_recurringRules.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: AppTheme.spacingMd),
+                child: Center(
+                  child: Text(
+                    '定期支出ルールはありません',
+                    style: TextStyle(color: AppTheme.subtleText),
+                  ),
+                ),
+              )
+            else
+              ..._recurringRules.map((rule) => _buildRecurringRuleTile(rule)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 定期支出ルール1件の表示
+  Widget _buildRecurringRuleTile(RecurringRule rule) {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(
+        rule.isActive ? Icons.repeat : Icons.repeat_one,
+        color: rule.isActive
+            ? Theme.of(context).colorScheme.primary
+            : AppTheme.subtleText,
+      ),
+      title: Text(
+        rule.categoryName ?? '不明',
+        style: TextStyle(
+          color: rule.isActive ? null : AppTheme.subtleText,
+          decoration: rule.isActive ? null : TextDecoration.lineThrough,
+        ),
+      ),
+      subtitle: Text(
+        '¥${rule.amount} / ${rule.frequencyLabel}'
+        '${rule.memo != null && rule.memo!.isNotEmpty ? '  ${rule.memo}' : ''}',
+        style: TextStyle(fontSize: 12, color: AppTheme.subtleText),
+      ),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 有効/無効トグル
+          Switch(
+            value: rule.isActive,
+            onChanged: _isSaving
+                ? null
+                : (value) => _toggleRecurringRule(rule, value),
+          ),
+          // 編集ボタン
+          IconButton(
+            icon: const Icon(Icons.edit, size: 20),
+            tooltip: '編集',
+            onPressed: _isSaving
+                ? null
+                : () => _showRecurringRuleDialog(existing: rule),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 定期支出ルールの有効/無効を切り替え
+  Future<void> _toggleRecurringRule(RecurringRule rule, bool isActive) async {
+    if (_isSaving) return;
+    setState(() => _isSaving = true);
+    try {
+      if (isActive) {
+        await _recurringRepo.activate(rule.id);
+      } else {
+        await _recurringRepo.deactivate(rule.id);
+      }
+      await _load();
+    } catch (e) {
+      if (mounted) {
+        await handleError(
+          context: context,
+          error: e,
+          debugLabel: '定期支出ルール更新エラー',
+          userMessage: '定期支出ルールの更新に失敗しました',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
+    }
+  }
+
+  /// 定期支出ルール追加/編集ダイアログ
+  Future<void> _showRecurringRuleDialog({RecurringRule? existing}) async {
+    if (_isSaving) return;
+
+    // 支出カテゴリのみ使用可能
+    final categories = _expenseCategories;
+    if (categories.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('先に支出カテゴリを追加してください')),
+      );
+      return;
+    }
+
+    final formKey = GlobalKey<FormState>();
+    final amountController = TextEditingController(
+      text: existing?.amount.toString() ?? '',
+    );
+    final memoController = TextEditingController(text: existing?.memo ?? '');
+    final intervalController = TextEditingController(
+      text: existing?.frequencyInterval.toString() ?? '1',
+    );
+
+    String? selectedCategoryId = existing?.categoryId ?? categories.first.id;
+    String selectedUnit = existing?.frequencyUnit ?? 'month';
+    DateTime selectedStartDate = existing?.startDate ?? DateTime.now();
+    DateTime? selectedEndDate = existing?.endDate;
+
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: Text(existing == null ? '定期支出追加' : '定期支出編集'),
+              content: SingleChildScrollView(
+                child: Form(
+                  key: formKey,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // カテゴリ選択
+                      DropdownButtonFormField<String>(
+                        initialValue: selectedCategoryId,
+                        decoration: const InputDecoration(
+                          labelText: 'カテゴリ',
+                          border: OutlineInputBorder(),
+                        ),
+                        items: categories.map((c) {
+                          return DropdownMenuItem(
+                            value: c.id,
+                            child: Text(c.name),
+                          );
+                        }).toList(),
+                        onChanged: (v) {
+                          setDialogState(() => selectedCategoryId = v);
+                        },
+                        validator: (v) =>
+                            v == null ? 'カテゴリを選択してください' : null,
+                      ),
+                      const SizedBox(height: AppTheme.spacingMd),
+                      // 金額
+                      TextFormField(
+                        controller: amountController,
+                        decoration: const InputDecoration(
+                          labelText: '金額',
+                          prefixText: '¥',
+                          border: OutlineInputBorder(),
+                        ),
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
+                        validator: (v) {
+                          if (v == null || v.isEmpty) return '金額を入力してください';
+                          final n = int.tryParse(v);
+                          if (n == null || n < 0) return '正の整数を入力してください';
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: AppTheme.spacingMd),
+                      // メモ
+                      TextFormField(
+                        controller: memoController,
+                        decoration: const InputDecoration(
+                          labelText: 'メモ（任意）',
+                          hintText: '例: Netflix',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: AppTheme.spacingMd),
+                      // 頻度: ユニット選択
+                      DropdownButtonFormField<String>(
+                        initialValue: selectedUnit,
+                        decoration: const InputDecoration(
+                          labelText: '頻度',
+                          border: OutlineInputBorder(),
+                        ),
+                        items: const [
+                          DropdownMenuItem(value: 'week', child: Text('毎週')),
+                          DropdownMenuItem(value: 'month', child: Text('毎月')),
+                          DropdownMenuItem(value: 'year', child: Text('毎年')),
+                        ],
+                        onChanged: (v) {
+                          if (v != null) {
+                            setDialogState(() => selectedUnit = v);
+                          }
+                        },
+                      ),
+                      const SizedBox(height: AppTheme.spacingMd),
+                      // 頻度: 間隔
+                      TextFormField(
+                        controller: intervalController,
+                        decoration: const InputDecoration(
+                          labelText: '間隔',
+                          helperText: '例: 2 = 2週/2月/2年ごと',
+                          border: OutlineInputBorder(),
+                        ),
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
+                        validator: (v) {
+                          if (v == null || v.isEmpty) return '間隔を入力してください';
+                          final n = int.tryParse(v);
+                          if (n == null || n < 1) return '1以上を入力してください';
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: AppTheme.spacingMd),
+                      // 開始日
+                      InkWell(
+                        onTap: () async {
+                          final picked = await showDatePicker(
+                            context: context,
+                            initialDate: selectedStartDate,
+                            firstDate: DateTime(2020),
+                            lastDate: DateTime(2100),
+                          );
+                          if (picked != null) {
+                            setDialogState(() => selectedStartDate = picked);
+                          }
+                        },
+                        child: InputDecorator(
+                          decoration: const InputDecoration(
+                            labelText: '開始日',
+                            border: OutlineInputBorder(),
+                            suffixIcon: Icon(Icons.calendar_today),
+                          ),
+                          child: Text(
+                            '${selectedStartDate.year}/${selectedStartDate.month.toString().padLeft(2, '0')}/${selectedStartDate.day.toString().padLeft(2, '0')}',
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: AppTheme.spacingMd),
+                      // 終了日（任意）
+                      InkWell(
+                        onTap: () async {
+                          final picked = await showDatePicker(
+                            context: context,
+                            initialDate: selectedEndDate ?? selectedStartDate,
+                            firstDate: selectedStartDate,
+                            lastDate: DateTime(2100),
+                          );
+                          if (picked != null) {
+                            setDialogState(() => selectedEndDate = picked);
+                          }
+                        },
+                        child: InputDecorator(
+                          decoration: InputDecoration(
+                            labelText: '終了日（任意）',
+                            border: const OutlineInputBorder(),
+                            suffixIcon: selectedEndDate != null
+                                ? IconButton(
+                                    icon: const Icon(Icons.clear),
+                                    onPressed: () {
+                                      setDialogState(
+                                          () => selectedEndDate = null);
+                                    },
+                                  )
+                                : const Icon(Icons.calendar_today),
+                          ),
+                          child: Text(
+                            selectedEndDate != null
+                                ? '${selectedEndDate!.year}/${selectedEndDate!.month.toString().padLeft(2, '0')}/${selectedEndDate!.day.toString().padLeft(2, '0')}'
+                                : '未設定',
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('キャンセル'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    if (formKey.currentState!.validate()) {
+                      Navigator.pop(context, {
+                        'categoryId': selectedCategoryId,
+                        'amount': int.parse(amountController.text),
+                        'memo': memoController.text.trim().isEmpty
+                            ? null
+                            : memoController.text.trim(),
+                        'frequencyUnit': selectedUnit,
+                        'frequencyInterval':
+                            int.parse(intervalController.text),
+                        'startDate': selectedStartDate,
+                        'endDate': selectedEndDate,
+                      });
+                    }
+                  },
+                  child: const Text('保存'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (result == null) return;
+
+    setState(() => _isSaving = true);
+    try {
+      if (existing == null) {
+        await _recurringRepo.create(
+          categoryId: result['categoryId'] as String,
+          amount: result['amount'] as int,
+          memo: result['memo'] as String?,
+          frequencyUnit: result['frequencyUnit'] as String,
+          frequencyInterval: result['frequencyInterval'] as int,
+          startDate: result['startDate'] as DateTime,
+          endDate: result['endDate'] as DateTime?,
+        );
+      } else {
+        await _recurringRepo.update(
+          id: existing.id,
+          categoryId: result['categoryId'] as String,
+          amount: result['amount'] as int,
+          memo: result['memo'] as String?,
+          frequencyUnit: result['frequencyUnit'] as String,
+          frequencyInterval: result['frequencyInterval'] as int,
+          startDate: result['startDate'] as DateTime,
+          endDate: result['endDate'] as DateTime?,
+          isActive: existing.isActive,
+        );
+      }
+      await _load();
+    } catch (e) {
+      if (mounted) {
+        await handleError(
+          context: context,
+          error: e,
+          debugLabel: '定期支出ルール保存エラー',
+          userMessage: '定期支出ルールの保存に失敗しました',
         );
       }
     } finally {
@@ -612,6 +1012,8 @@ class _SettingsScreenState extends State<SettingsScreen>
                   child: CustomScrollView(
                     slivers: [
                       SliverToBoxAdapter(child: _buildCurrencySection()),
+                      // 定期支出セクション
+                      SliverToBoxAdapter(child: _buildRecurringSection()),
                       // カテゴリ管理セクションヘッダー
                       SliverToBoxAdapter(
                         child: Padding(

@@ -257,12 +257,17 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
   }
 
   Future<void> _delete() async {
+    final tx = widget.existing!;
+    final isRecurring = tx.isRecurring;
+
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) {
         return AlertDialog(
           title: const Text('取引削除'),
-          content: const Text('この取引を削除しますか？'),
+          content: Text(isRecurring
+              ? 'この定期支出を削除しますか？\n削除するとこの日付の分は再生成されなくなります。'
+              : 'この取引を削除しますか？'),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -284,7 +289,18 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
 
     setState(() => _isSaving = true);
     try {
-      await _txRepo.delete(widget.existing!.id);
+      if (isRecurring &&
+          tx.recurringRuleId != null &&
+          tx.scheduledFor != null) {
+        // 定期支出: skip例外を登録して再生成を防止
+        await _txRepo.deleteRecurring(
+          tx.id,
+          recurringRuleId: tx.recurringRuleId!,
+          scheduledFor: tx.scheduledFor!,
+        );
+      } else {
+        await _txRepo.delete(tx.id);
+      }
       if (mounted) Navigator.pop(context, true);
     } catch (e) {
       if (mounted) {
