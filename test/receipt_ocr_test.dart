@@ -270,7 +270,8 @@ void main() {
     test('コンビニレシート', () {
       final result =
           ReceiptOcrService.extractFromText(sampleConvenienceReceipt);
-      expect(result.merchantName, 'セブン-イレブン');
+      // Step21: チェーン名正規化により `セブン-イレブン` も `セブンイレブン` に統一される
+      expect(result.merchantName, 'セブンイレブン');
       expect(result.totalAmount, 334);
       expect(result.isEmpty, isFalse);
     });
@@ -303,10 +304,16 @@ void main() {
       expect(result.confidence, 0.0);
     });
 
-    test('数字のみの文字列', () {
+    test('数字のみの文字列（通貨記号なし）', () {
       final result = ReceiptOcrService.extractFromText('12345');
-      // 数字のみでも金額として抽出可能
-      expect(result.totalAmount, isNotNull);
+      // Step21: 通貨記号を伴わない素の 5 桁数字は伝票番号系として採用しない
+      expect(result.totalAmount, isNull);
+    });
+
+    test('数字のみの文字列（¥付き）', () {
+      final result = ReceiptOcrService.extractFromText('¥12345');
+      // 通貨記号付きなら fallback で抽出される
+      expect(result.totalAmount, 12345);
     });
 
     test('日本語のみの文字列（金額なし）', () {
@@ -542,7 +549,8 @@ void main() {
         ),
       ];
       final result = ReceiptOcrService.extractFromTokens(tokens);
-      expect(result.merchantName, 'セブン-イレブン');
+      // Step21: チェーン名正規化（セブン-イレブン → セブンイレブン）
+      expect(result.merchantName, 'セブンイレブン');
       expect(result.totalAmount, 334);
       expect(result.isEmpty, isFalse);
     });
@@ -2047,6 +2055,1830 @@ void main() {
       final result = ReceiptOcrService.extractTotalFromTokens(tokens);
       expect(result, isNotNull);
       expect(result!.value, 670);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // Step21: OCR誤抽出ハードニング
+  // ══════════════════════════════════════════════════════════════
+
+  group('Step21: fallback 除外強化（伝票番号・電話番号・会員コード）', () {
+    test('伝票番号 #1227620260228213330207040228446 → 採用しない', () {
+      final result = ReceiptOcrService.extractTotal([
+        '#1227620260228213330207040228446',
+      ]);
+      expect(result, isNull);
+    });
+
+    test('電話番号 260-228-215-0268 → 採用しない', () {
+      final result = ReceiptOcrService.extractTotal([
+        '260-228-215-0268',
+      ]);
+      expect(result, isNull);
+    });
+
+    test('伝票番号 260-228-215-0268（ラベル付き）→ 採用しない', () {
+      final result = ReceiptOcrService.extractTotal([
+        '伝票番号 260-228-215-0268',
+      ]);
+      expect(result, isNull);
+    });
+
+    test('会員コード 行は採用しない', () {
+      final result = ReceiptOcrService.extractTotal([
+        '会員コード 12345678',
+      ]);
+      expect(result, isNull);
+    });
+
+    test('TEL行は採用しない（電話番号が金額に化けない）', () {
+      final result = ReceiptOcrService.extractTotal([
+        'TEL 03-1234-5678',
+      ]);
+      expect(result, isNull);
+    });
+
+    test('素の 6 桁数字 228215 単独 → 採用しない', () {
+      final result = ReceiptOcrService.extractTotal(['228215']);
+      expect(result, isNull);
+    });
+
+    test('isUnsafeAmountContext: ハッシュ伝票番号', () {
+      expect(
+        ReceiptOcrService.isUnsafeAmountContext('#1234567890'),
+        isTrue,
+      );
+    });
+
+    test('isUnsafeAmountContext: 電話番号', () {
+      expect(
+        ReceiptOcrService.isUnsafeAmountContext('TEL 03-1234-5678'),
+        isTrue,
+      );
+    });
+
+    test('isUnsafeAmountContext: 会員', () {
+      expect(
+        ReceiptOcrService.isUnsafeAmountContext('会員番号 12345'),
+        isTrue,
+      );
+    });
+
+    test('isUnsafeAmountContext: 通常の合計行は false', () {
+      expect(
+        ReceiptOcrService.isUnsafeAmountContext('合計 ¥670'),
+        isFalse,
+      );
+    });
+  });
+
+  group('Step21: 合計ラベルの fuzzy 正規化', () {
+    test('「合 言十 ¥670」→ 670 が抽出される', () {
+      final result = ReceiptOcrService.extractTotal(['合 言十 ¥670']);
+      expect(result, isNotNull);
+      expect(result!.value, 670);
+    });
+
+    test('「合言十 ¥670」→ 670 が抽出される', () {
+      final result = ReceiptOcrService.extractTotal(['合言十 ¥670']);
+      expect(result, isNotNull);
+      expect(result!.value, 670);
+    });
+
+    test('「谷 計 ¥670」→ 670 が抽出される（弱い候補）', () {
+      final result = ReceiptOcrService.extractTotal(['谷 計 ¥670']);
+      expect(result, isNotNull);
+      expect(result!.value, 670);
+    });
+
+    test('「台 計 ¥670」→ 670 が抽出される（弱い候補）', () {
+      final result = ReceiptOcrService.extractTotal(['台 計 ¥670']);
+      expect(result, isNotNull);
+      expect(result!.value, 670);
+    });
+
+    test('正常な「合計 ¥670」も従来通り抽出される（fuzzy で副作用なし）', () {
+      final result = ReceiptOcrService.extractTotal(['合計 ¥670']);
+      expect(result, isNotNull);
+      expect(result!.value, 670);
+      expect(result.score, 2.0);
+    });
+
+    test('小計 ¥618 と合計 fuzzy が共存 → 正規ラベル（合計 weight 1.0）が優先', () {
+      // 小計が weight として上がらず、fuzzy ラベルとも比較される
+      final result = ReceiptOcrService.extractTotal([
+        '小計 ¥618',
+        '合 言十 ¥670',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 670);
+    });
+  });
+
+  group('Step21: 合計ラベル直下行の金額ペアリング（湾曲対応）', () {
+    test('bbox: 合計ラベルの直下行右側の金額が採用される', () {
+      // 行が分かれているケース（湾曲・斜め）
+      final tokens = [
+        OcrToken(
+          text: '合計',
+          bbox: const OcrBoundingBox(x: 10, y: 200, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '¥670',
+          bbox: const OcrBoundingBox(x: 200, y: 240, width: 60, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractTotalFromTokens(tokens);
+      expect(result, isNotNull);
+      expect(result!.value, 670);
+    });
+
+    test('bbox: 直下行が支払行なら採用しない', () {
+      final tokens = [
+        OcrToken(
+          text: '合計',
+          bbox: const OcrBoundingBox(x: 10, y: 200, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: 'PayPay支払',
+          bbox: const OcrBoundingBox(x: 10, y: 240, width: 120, height: 16),
+        ),
+        OcrToken(
+          text: '¥670',
+          bbox: const OcrBoundingBox(x: 200, y: 240, width: 60, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractTotalFromTokens(tokens);
+      // 同一行に右側金額がない + 直下行が支払行 → ラベル候補は採用されない
+      // フォールバックも除外文脈で null になる想定
+      expect(result, isNull);
+    });
+  });
+
+  group('Step21: チェーン名正規化（セブンイレブン）', () {
+    test('「セブン-イレブン」→ 「セブンイレブン」', () {
+      final result = ReceiptOcrService.extractFromText(
+        'セブン-イレブン\n千代田区丸の内1-1-1\n合計 ¥670',
+      );
+      expect(result.merchantName, 'セブンイレブン');
+      expect(result.totalAmount, 670);
+    });
+
+    test('「7-ELEVEN」→ 「セブンイレブン」', () {
+      final result = ReceiptOcrService.extractFromText(
+        '7-ELEVEN\n河内下岡本店\n合計 ¥670',
+      );
+      expect(result.merchantName, 'セブンイレブン');
+    });
+
+    test('「セブン イレブン」（空白区切り）→ 「セブンイレブン」', () {
+      final result = ReceiptOcrService.extractFromText(
+        'セブン イレブン\n合計 ¥670',
+      );
+      expect(result.merchantName, 'セブンイレブン');
+    });
+
+    test('「SEVEN ELEVEN」→ 「セブンイレブン」', () {
+      final result = ReceiptOcrService.extractFromText(
+        'SEVEN ELEVEN\n合計 ¥670',
+      );
+      expect(result.merchantName, 'セブンイレブン');
+    });
+
+    test('ロゴ崩れ断片からの正規化（セブ + イレブン）', () {
+      // 実ログ「どど ピ セブ フン - イ ルレ ル ブン」相当の断片
+      final result = ReceiptOcrService.extractFromText(
+        'どど\nピ セブ フン\n- イ ルレ\nル ブン\n合計 ¥670',
+      );
+      expect(result.merchantName, 'セブンイレブン');
+    });
+
+    test('支店名（河内下岡本店）+ チェーン名 → チェーン名が優先', () {
+      final result = ReceiptOcrService.extractFromText(
+        'セブン-イレブン\n河内下岡本店\n合計 ¥670',
+      );
+      // 河内下岡本店ではなくセブンイレブンを優先
+      expect(result.merchantName, 'セブンイレブン');
+    });
+
+    test('チェーン名がない場合は通常の店名抽出が使われる', () {
+      final result = ReceiptOcrService.extractFromText(
+        'イオンモール幕張\n合計 ¥670',
+      );
+      // 「店」キーワードを含むのでイオン~が選ばれる
+      expect(result.merchantName, isNotNull);
+      expect(result.merchantName, contains('イオン'));
+    });
+
+    test('単独の「7」「11」だけではチェーン名と判定しない', () {
+      final result = ReceiptOcrService.extractFromText(
+        '7\n11\n合計 ¥670',
+      );
+      // 短い断片のみ → 不確定。チェーン名にはならない
+      expect(result.merchantName, isNot('セブンイレブン'));
+    });
+
+    test('bbox: 上部領域のロゴ崩れトークン → セブンイレブン', () {
+      final tokens = [
+        // ロゴ崩れ（上部領域）
+        OcrToken(
+          text: 'どど',
+          bbox: const OcrBoundingBox(x: 10, y: 10, width: 40, height: 30),
+        ),
+        OcrToken(
+          text: 'ピ セブ',
+          bbox: const OcrBoundingBox(x: 60, y: 10, width: 80, height: 30),
+        ),
+        OcrToken(
+          text: 'フン - イ ルレ',
+          bbox: const OcrBoundingBox(x: 150, y: 10, width: 140, height: 30),
+        ),
+        OcrToken(
+          text: 'ル ブン',
+          bbox: const OcrBoundingBox(x: 290, y: 10, width: 60, height: 30),
+        ),
+        OcrToken(
+          text: '河内下岡本店',
+          bbox: const OcrBoundingBox(x: 10, y: 50, width: 120, height: 20),
+        ),
+        // 合計（下部）
+        OcrToken(
+          text: '合計',
+          bbox: const OcrBoundingBox(x: 10, y: 400, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '¥670',
+          bbox: const OcrBoundingBox(x: 200, y: 400, width: 60, height: 20),
+        ),
+        // 画像高さ確保のためのダミー（最下部）
+        OcrToken(
+          text: '伝票番号',
+          bbox: const OcrBoundingBox(x: 10, y: 600, width: 80, height: 16),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.merchantName, 'セブンイレブン');
+      expect(result.totalAmount, 670);
+    });
+  });
+
+  group('Step21: IMG_1783 misrecognition fixture（実ログ再現）', () {
+    /// IMG_1783.jpg の実ログ誤抽出を再現する token fixture
+    ///
+    /// 実ログ:
+    ///   merchant=どど ピ セブ フン - イ ルレ ル ブン
+    ///   total=228215
+    ///
+    /// 現状のロジックで `228215` は伝票番号系の誤採用、
+    /// 店名はロゴ崩れ文字列の誤採用。
+    /// Step21 の修正後は merchant=セブンイレブン, total=670 になる。
+    List<OcrToken> buildImg1783Fixture() {
+      return [
+        // ── 上部: ロゴ崩れ ──
+        OcrToken(
+          text: 'どど',
+          bbox: const OcrBoundingBox(x: 100, y: 50, width: 80, height: 60),
+        ),
+        OcrToken(
+          text: 'ピ',
+          bbox: const OcrBoundingBox(x: 200, y: 50, width: 30, height: 60),
+        ),
+        OcrToken(
+          text: 'セブ',
+          bbox: const OcrBoundingBox(x: 240, y: 50, width: 60, height: 60),
+        ),
+        OcrToken(
+          text: 'フン',
+          bbox: const OcrBoundingBox(x: 310, y: 50, width: 60, height: 60),
+        ),
+        OcrToken(
+          text: '-',
+          bbox: const OcrBoundingBox(x: 380, y: 50, width: 20, height: 60),
+        ),
+        OcrToken(
+          text: 'イ',
+          bbox: const OcrBoundingBox(x: 410, y: 50, width: 30, height: 60),
+        ),
+        OcrToken(
+          text: 'ルレ',
+          bbox: const OcrBoundingBox(x: 450, y: 50, width: 60, height: 60),
+        ),
+        OcrToken(
+          text: 'ル',
+          bbox: const OcrBoundingBox(x: 520, y: 50, width: 30, height: 60),
+        ),
+        OcrToken(
+          text: 'ブン',
+          bbox: const OcrBoundingBox(x: 560, y: 50, width: 60, height: 60),
+        ),
+        // 支店名
+        OcrToken(
+          text: '河内下岡本店',
+          bbox: const OcrBoundingBox(x: 100, y: 130, width: 200, height: 25),
+        ),
+        // 住所・電話
+        OcrToken(
+          text: '大阪府東大阪市',
+          bbox: const OcrBoundingBox(x: 100, y: 165, width: 200, height: 20),
+        ),
+        OcrToken(
+          text: 'TEL 06-1234-5678',
+          bbox: const OcrBoundingBox(x: 100, y: 190, width: 220, height: 20),
+        ),
+        // 商品
+        OcrToken(
+          text: 'おにぎり',
+          bbox: const OcrBoundingBox(x: 100, y: 250, width: 100, height: 20),
+        ),
+        OcrToken(
+          text: '¥150',
+          bbox: const OcrBoundingBox(x: 500, y: 250, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: 'お茶',
+          bbox: const OcrBoundingBox(x: 100, y: 280, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '¥160',
+          bbox: const OcrBoundingBox(x: 500, y: 280, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: 'パン',
+          bbox: const OcrBoundingBox(x: 100, y: 310, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '¥360',
+          bbox: const OcrBoundingBox(x: 500, y: 310, width: 60, height: 20),
+        ),
+        // 集計
+        OcrToken(
+          text: '小計',
+          bbox: const OcrBoundingBox(x: 100, y: 380, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '¥618',
+          bbox: const OcrBoundingBox(x: 500, y: 380, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '消費税等',
+          bbox: const OcrBoundingBox(x: 100, y: 410, width: 80, height: 20),
+        ),
+        OcrToken(
+          text: '¥49',
+          bbox: const OcrBoundingBox(x: 500, y: 410, width: 50, height: 20),
+        ),
+        // 税率対象（誤誘導）
+        OcrToken(
+          text: '税率 8%対象',
+          bbox: const OcrBoundingBox(x: 100, y: 440, width: 130, height: 20),
+        ),
+        OcrToken(
+          text: '¥667',
+          bbox: const OcrBoundingBox(x: 500, y: 440, width: 60, height: 20),
+        ),
+        // 合計
+        OcrToken(
+          text: '合計',
+          bbox: const OcrBoundingBox(x: 100, y: 480, width: 60, height: 24),
+        ),
+        OcrToken(
+          text: '¥670',
+          bbox: const OcrBoundingBox(x: 500, y: 480, width: 70, height: 24),
+        ),
+        // 支払行（同額の誤誘導）
+        OcrToken(
+          text: 'PayPay支払',
+          bbox: const OcrBoundingBox(x: 100, y: 520, width: 130, height: 20),
+        ),
+        OcrToken(
+          text: '¥670',
+          bbox: const OcrBoundingBox(x: 500, y: 520, width: 60, height: 20),
+        ),
+        // 下部: 伝票番号・取引番号系（誤採用候補のソース）
+        OcrToken(
+          text: '#1227620260228213330207040228446',
+          bbox: const OcrBoundingBox(x: 100, y: 600, width: 480, height: 18),
+        ),
+        OcrToken(
+          text: '伝票番号',
+          bbox: const OcrBoundingBox(x: 100, y: 630, width: 80, height: 18),
+        ),
+        OcrToken(
+          text: '260-228-215-0268',
+          bbox: const OcrBoundingBox(x: 200, y: 630, width: 200, height: 18),
+        ),
+        OcrToken(
+          text: '会員コード',
+          bbox: const OcrBoundingBox(x: 100, y: 660, width: 100, height: 18),
+        ),
+        OcrToken(
+          text: '228215',
+          bbox: const OcrBoundingBox(x: 220, y: 660, width: 80, height: 18),
+        ),
+        OcrToken(
+          text: 'バーコード領域',
+          bbox: const OcrBoundingBox(x: 100, y: 700, width: 480, height: 60),
+        ),
+      ];
+    }
+
+    test('IMG_1783 fixture: total=670 が抽出される', () {
+      final result = ReceiptOcrService.extractFromTokens(buildImg1783Fixture());
+      expect(result.totalAmount, 670);
+    });
+
+    test('IMG_1783 fixture: merchant=セブンイレブン に正規化される', () {
+      final result = ReceiptOcrService.extractFromTokens(buildImg1783Fixture());
+      expect(result.merchantName, 'セブンイレブン');
+    });
+
+    test('IMG_1783 fixture: 228215 は採用されない', () {
+      final result = ReceiptOcrService.extractFromTokens(buildImg1783Fixture());
+      expect(result.totalAmount, isNot(228215));
+    });
+
+    test('IMG_1783 fixture: confidence は 0.5 以上', () {
+      final result = ReceiptOcrService.extractFromTokens(buildImg1783Fixture());
+      expect(result.confidence, greaterThanOrEqualTo(0.5));
+    });
+  });
+
+  group('Step21: 候補トレース機構（debug-only）', () {
+    test('extractFromTokens 呼び出し後にトレースが残る', () {
+      final tokens = [
+        OcrToken(
+          text: '合計',
+          bbox: const OcrBoundingBox(x: 10, y: 100, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '¥670',
+          bbox: const OcrBoundingBox(x: 200, y: 100, width: 60, height: 20),
+        ),
+      ];
+      ReceiptOcrService.extractFromTokens(tokens);
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      // accepted ログが少なくとも 1 件記録されている
+      expect(
+        trace.any((m) => m.contains('accepted')),
+        isTrue,
+        reason: 'accepted ログが記録されること',
+      );
+    });
+
+    test('extractFromTokens を再呼び出しするとトレースがクリアされる', () {
+      ReceiptOcrService.extractFromTokens([
+        OcrToken(
+          text: '合計',
+          bbox: const OcrBoundingBox(x: 10, y: 100, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '¥1,000',
+          bbox: const OcrBoundingBox(x: 200, y: 100, width: 80, height: 20),
+        ),
+      ]);
+      final firstSize = ReceiptOcrService.lastCandidateTrace.length;
+      ReceiptOcrService.extractFromTokens([
+        OcrToken(
+          text: '合計',
+          bbox: const OcrBoundingBox(x: 10, y: 100, width: 60, height: 20),
+        ),
+        OcrToken(
+          text: '¥500',
+          bbox: const OcrBoundingBox(x: 200, y: 100, width: 60, height: 20),
+        ),
+      ]);
+      // 2回目の呼び出しで前回分が引き継がれていない（呼び出し直前にクリア）
+      // 厳密にサイズ等価でなくても良い。少なくとも累積はしていないこと。
+      expect(
+        ReceiptOcrService.lastCandidateTrace.length,
+        lessThanOrEqualTo(firstSize + 5),
+      );
+    });
+
+    test('伝票番号トークンが reject 理由付きでトレースされる', () {
+      // ラベル不在 fallback 経路で reject 理由が記録されることを確認
+      ReceiptOcrService.extractFromText(
+        '伝票番号 260-228-215-0268\n会員コード 228215',
+      );
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      expect(
+        trace.any((m) => m.contains('rejected') &&
+            m.contains('unsafe_context')),
+        isTrue,
+        reason: 'unsafe_context による rejection ログが残ること',
+      );
+    });
+  });
+
+  // ─────────────────────────────────────────────────
+  // Step21 Round52 監査対応
+  // ─────────────────────────────────────────────────
+
+  group('Step21 R52: 店名正規化の過剰マッチ防止（H-1）', () {
+    test('セブン銀行は「セブンイレブン」に正規化されない', () {
+      final result = ReceiptOcrService.extractFromText(
+        'セブン銀行ATM\n大阪支店\n合計 ¥670',
+      );
+      expect(result.merchantName, isNot('セブンイレブン'));
+    });
+
+    test('セブンティーンアイス を含む店名は正規化されない', () {
+      final result = ReceiptOcrService.extractFromText(
+        'セブンティーンアイス専門店\n合計 ¥670',
+      );
+      expect(result.merchantName, isNot('セブンイレブン'));
+    });
+
+    test('セブンプレミアム は正規化されない', () {
+      final result = ReceiptOcrService.extractFromText(
+        'セブンプレミアム ストア\n合計 ¥670',
+      );
+      expect(result.merchantName, isNot('セブンイレブン'));
+    });
+
+    test('セブンアンドアイ は正規化されない', () {
+      final result = ReceiptOcrService.extractFromText(
+        'セブン&アイ ホールディングス\n合計 ¥670',
+      );
+      expect(result.merchantName, isNot('セブンイレブン'));
+    });
+
+    test('「セブン」単独（後半グループ未ヒット）では正規化されない', () {
+      // group A だけヒット、group B は未ヒット → 確定しない
+      final result = ReceiptOcrService.extractFromText(
+        'セブンスター 喫茶\n合計 ¥670',
+      );
+      expect(result.merchantName, isNot('セブンイレブン'));
+    });
+
+    test('「イレブン」単独（前半グループ未ヒット）では正規化されない', () {
+      final result = ReceiptOcrService.extractFromText(
+        'イレブンカフェ\n合計 ¥670',
+      );
+      expect(result.merchantName, isNot('セブンイレブン'));
+    });
+
+    test('exact: 「セブン-イレブン」は単独でセブンイレブンに正規化される', () {
+      final result = ReceiptOcrService.extractFromText(
+        'セブン-イレブン\n合計 ¥670',
+      );
+      expect(result.merchantName, 'セブンイレブン');
+    });
+
+    test('exact: 「7-ELEVEN」は単独でセブンイレブンに正規化される', () {
+      final result = ReceiptOcrService.extractFromText(
+        '7-ELEVEN\n合計 ¥670',
+      );
+      expect(result.merchantName, 'セブンイレブン');
+    });
+  });
+
+  group('Step21 R52: fuzzy 合計ラベルのラベル起点抽出（H-2）', () {
+    test('「合 言十 2,916」→ 2916 がラベル起点で抽出される', () {
+      ReceiptOcrService.resetCandidateTrace();
+      final result = ReceiptOcrService.extractTotal(['合 言十 2,916']);
+      expect(result, isNotNull);
+      expect(result!.value, 2916);
+      // ラベル起点（fallback ではない）で抽出されたことをトレースで確認
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      expect(
+        trace.any((m) => m.contains('total_label_text') ||
+            m.contains('total_label_same_line')),
+        isTrue,
+        reason: 'fuzzy ラベル経由でラベル起点抽出が成立すること',
+      );
+      expect(
+        trace.any((m) => m.contains('fallback_currency')),
+        isFalse,
+        reason: 'fallback_currency 経由ではないこと',
+      );
+    });
+
+    test('「合言十 2,916」→ 2916 がラベル起点で抽出される', () {
+      ReceiptOcrService.resetCandidateTrace();
+      final result = ReceiptOcrService.extractTotal(['合言十 2,916']);
+      expect(result, isNotNull);
+      expect(result!.value, 2916);
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      expect(
+        trace.any((m) => m.contains('fallback_currency')),
+        isFalse,
+      );
+    });
+
+    test('「谷 計 1580」→ 1580 がラベル起点で抽出される', () {
+      ReceiptOcrService.resetCandidateTrace();
+      final result = ReceiptOcrService.extractTotal(['谷 計 1580']);
+      expect(result, isNotNull);
+      expect(result!.value, 1580);
+      // 通貨記号なしの 1580 は fallback では弾かれるため、
+      // ラベル起点でなければ抽出できない
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      expect(
+        trace.any((m) => m.contains('total_label_text')),
+        isTrue,
+      );
+    });
+
+    test('「台 計 1580」→ 1580 がラベル起点で抽出される', () {
+      final result = ReceiptOcrService.extractTotal(['台 計 1580']);
+      expect(result, isNotNull);
+      expect(result!.value, 1580);
+    });
+
+    test('小計 618 / 合 言十 670 / PayPay支払 670 → 670 が抽出される', () {
+      final result = ReceiptOcrService.extractTotal([
+        '小計 ¥618',
+        '合 言十 ¥670',
+        'PayPay支払 ¥670',
+      ]);
+      expect(result, isNotNull);
+      expect(result!.value, 670);
+    });
+
+    test('「合 言 十 ¥670」（言と十の間に空白）→ 670 が抽出される', () {
+      final result = ReceiptOcrService.extractTotal(['合 言 十 ¥670']);
+      expect(result, isNotNull);
+      expect(result!.value, 670);
+    });
+  });
+
+  // ─────────────────────────────────────────────────
+  // Step22 実OCR再発ログ対応
+  // ─────────────────────────────────────────────────
+
+  group('Step22: 商品行fallback抑制（T22-03）', () {
+    test('商品代金 ¥651 単独 → 651 を合計として採用しない', () {
+      ReceiptOcrService.resetCandidateTrace();
+      final result = ReceiptOcrService.extractFromText('商品代金 ¥651');
+      expect(result.totalAmount, isNot(651));
+    });
+
+    test('商品代金 ¥651 / 合計 ¥670 → 670 を採用', () {
+      final result = ReceiptOcrService.extractFromText(
+        '商品代金 ¥651\n合計 ¥670',
+      );
+      expect(result.totalAmount, 670);
+    });
+
+    test('商品代金 ¥651 / 合 言十 ¥670 → 670 を採用', () {
+      final result = ReceiptOcrService.extractFromText(
+        '商品代金 ¥651\n合 言十 ¥670',
+      );
+      expect(result.totalAmount, 670);
+    });
+
+    test('合計ラベル候補が存在 + 金額ペアリング不能 + 商品代金 ¥651 → 651 採用しない', () {
+      // 合計ラベルは存在するが、その行に金額が無く、
+      // 別行の `商品代金 ¥651` も fallback として採用しない
+      final result = ReceiptOcrService.extractFromText(
+        '合計\n商品代金 ¥651',
+      );
+      expect(result.totalAmount, isNot(651));
+    });
+
+    test('単価 ¥651 / 対象商品 ¥651 行は fallback 採用しない', () {
+      final r1 = ReceiptOcrService.extractFromText('単価 ¥651');
+      final r2 = ReceiptOcrService.extractFromText('対象商品 ¥651');
+      expect(r1.totalAmount, isNot(651));
+      expect(r2.totalAmount, isNot(651));
+    });
+
+    test('税率 8%対象 ¥667 単独 → 合計として採用しない', () {
+      final result = ReceiptOcrService.extractFromText('税率 8%対象 ¥667');
+      expect(result.totalAmount, isNot(667));
+    });
+
+    test('bbox経路: 商品代金 ¥651 単独 → 651 採用しない', () {
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '商品代金 ¥651',
+          bbox: OcrBoundingBox(x: 10, y: 200, width: 200, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, isNot(651));
+    });
+  });
+
+  group('Step22: bottom-up label pairing（T22-02）', () {
+    test('下部の合計 ¥670 が上部の小計 ¥618 より優先', () {
+      final result = ReceiptOcrService.extractFromText(
+        '小計 ¥618\n合計 ¥670',
+      );
+      expect(result.totalAmount, 670);
+    });
+
+    test('複数の合計候補 → 最下部の合計 ¥670 を優先', () {
+      // 上部: 中合計 ¥500、下部: 合計 ¥670 → 670 が採用される
+      final result = ReceiptOcrService.extractFromText(
+        '合計 ¥500\nPayPay支払 ¥500\n合計 ¥670',
+      );
+      expect(result.totalAmount, 670);
+    });
+
+    test('bbox経路: 下部の合計 ¥670 が上部の合計 ¥500 より優先', () {
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計 ¥500',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 100, height: 20),
+        ),
+        const OcrToken(
+          text: '合計 ¥670',
+          bbox: OcrBoundingBox(x: 10, y: 300, width: 100, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, 670);
+    });
+
+    test('bbox経路: 商品代金 ¥651 + 下部 合計 ¥670 → 670 を採用', () {
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '商品代金 ¥651',
+          bbox: OcrBoundingBox(x: 10, y: 200, width: 100, height: 20),
+        ),
+        const OcrToken(
+          text: '合計 ¥670',
+          bbox: OcrBoundingBox(x: 10, y: 300, width: 100, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, 670);
+    });
+  });
+
+  group('Step22: ロゴ崩れトークンセグメント化（T22-04）', () {
+    test('「ピ セブ フン - イ ルレ ル ブン」1トークン → セブンイレブン', () {
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: 'ピ セブ フン - イ ルレ ル ブン',
+          bbox: OcrBoundingBox(x: 10, y: 10, width: 300, height: 30),
+        ),
+        const OcrToken(
+          text: '合計 ¥670',
+          bbox: OcrBoundingBox(x: 10, y: 300, width: 100, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.merchantName, 'セブンイレブン');
+    });
+
+    test('「どど ピ セブ フン - イ ルレ ル ブン」1トークン → セブンイレブン', () {
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: 'どど ピ セブ フン - イ ルレ ル ブン',
+          bbox: OcrBoundingBox(x: 10, y: 10, width: 300, height: 30),
+        ),
+        const OcrToken(
+          text: '合計 ¥670',
+          bbox: OcrBoundingBox(x: 10, y: 300, width: 100, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.merchantName, 'セブンイレブン');
+    });
+
+    test('「セブンスター 喫茶」（同一セグメント）→ セブンイレブンに正規化されない', () {
+      final result = ReceiptOcrService.extractFromText(
+        'セブンスター 喫茶\n合計 ¥670',
+      );
+      expect(result.merchantName, isNot('セブンイレブン'));
+    });
+
+    test('「セブン銀行ATM」→ セブンイレブンに正規化されない', () {
+      final result = ReceiptOcrService.extractFromText(
+        'セブン銀行ATM\n合計 ¥670',
+      );
+      expect(result.merchantName, isNot('セブンイレブン'));
+    });
+
+    test('「イレブンカフェ」→ セブンイレブンに正規化されない', () {
+      final result = ReceiptOcrService.extractFromText(
+        'イレブンカフェ\n合計 ¥670',
+      );
+      expect(result.merchantName, isNot('セブンイレブン'));
+    });
+
+    test('Step22 N-2: 1トークン由来のセグメント化成立 → source=segmented_fragments',
+        () {
+      // ロゴ崩れが 1 OCR トークンに潰れた場合、セグメント化で成立する。
+      // 監査 R54 N-2: 通常断片共起と区別できるよう source=segmented_fragments を出す。
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: 'ピ セブ フン - イ ルレ ル ブン',
+          bbox: OcrBoundingBox(x: 10, y: 10, width: 300, height: 30),
+        ),
+        const OcrToken(
+          text: '合計 ¥670',
+          bbox: OcrBoundingBox(x: 10, y: 300, width: 100, height: 20),
+        ),
+      ];
+      ReceiptOcrService.extractFromTokens(tokens);
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      expect(
+        trace.any((m) => m.contains('merchantCandidate normalized')
+            && m.contains('chain=セブンイレブン')
+            && m.contains('source=segmented_fragments')),
+        isTrue,
+        reason: '1トークン由来の正規化は source=segmented_fragments を出す',
+      );
+    });
+
+    test('Step22 N-2: 異トークンの断片共起 → source=fragments を維持', () {
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: 'セブ',
+          bbox: OcrBoundingBox(x: 10, y: 10, width: 60, height: 30),
+        ),
+        const OcrToken(
+          text: 'イレブン',
+          bbox: OcrBoundingBox(x: 80, y: 10, width: 100, height: 30),
+        ),
+        const OcrToken(
+          text: '合計 ¥670',
+          bbox: OcrBoundingBox(x: 10, y: 300, width: 100, height: 20),
+        ),
+      ];
+      ReceiptOcrService.extractFromTokens(tokens);
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      expect(
+        trace.any((m) => m.contains('merchantCandidate normalized')
+            && m.contains('chain=セブンイレブン')
+            && m.contains('source=fragments')
+            && !m.contains('segmented_fragments')),
+        isTrue,
+        reason: '異トークン共起は従来通り source=fragments',
+      );
+    });
+
+    test('Step22 N-2: exactPatterns 一致 → source=exact', () {
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: 'セブン-イレブン',
+          bbox: OcrBoundingBox(x: 10, y: 10, width: 200, height: 30),
+        ),
+        const OcrToken(
+          text: '合計 ¥670',
+          bbox: OcrBoundingBox(x: 10, y: 300, width: 100, height: 20),
+        ),
+      ];
+      ReceiptOcrService.extractFromTokens(tokens);
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      expect(
+        trace.any((m) => m.contains('merchantCandidate normalized')
+            && m.contains('chain=セブンイレブン')
+            && m.contains('source=exact')),
+        isTrue,
+      );
+    });
+  });
+
+  group('Step22: IMG_1783 実OCR再現（T22-01）', () {
+    test('IMG_1783ログ再現: 商品代金 ¥651 が fallback 採用されず、合計 ¥670 採用、'
+        'merchantName=セブンイレブン', () {
+      ReceiptOcrService.resetCandidateTrace();
+      // 実OCRログを近似:
+      // - 上部にロゴ崩れ1トークン
+      // - no_currency_mark でreject される 4417
+      // - phone-like で reject される TEL 行
+      // - serial-only で reject される長桁
+      // - 中段に 商品代金 ¥651
+      // - 下部に 合計 ¥670（修正後はこれが採用されるべき）
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: 'どど ピ セブ フン - イ ルレ ル ブン',
+          bbox: OcrBoundingBox(x: 10, y: 10, width: 300, height: 30),
+        ),
+        const OcrToken(
+          text: '4417',
+          bbox: OcrBoundingBox(x: 10, y: 60, width: 50, height: 20),
+        ),
+        const OcrToken(
+          text: 'TEL 03-1234-5678',
+          bbox: OcrBoundingBox(x: 10, y: 90, width: 150, height: 20),
+        ),
+        const OcrToken(
+          text: '1234567890',
+          bbox: OcrBoundingBox(x: 10, y: 120, width: 80, height: 20),
+        ),
+        const OcrToken(
+          text: '商品代金 ¥651',
+          bbox: OcrBoundingBox(x: 10, y: 250, width: 100, height: 20),
+        ),
+        const OcrToken(
+          text: '合計 ¥670',
+          bbox: OcrBoundingBox(x: 10, y: 300, width: 100, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, 670, reason: '合計 ¥670 が採用されること');
+      expect(result.totalAmount, isNot(651), reason: '商品代金 ¥651 を採用しない');
+      expect(result.merchantName, 'セブンイレブン');
+
+      // fallback_currency_bbox では採用されないこと
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      expect(
+        trace.any((m) => m.contains('fallback_currency_bbox')
+            && m.contains('amount=651')),
+        isFalse,
+        reason: '商品代金 ¥651 の fallback_currency_bbox 採用が起きていないこと',
+      );
+    });
+
+    test('IMG_1783 相当: 合計ラベル無し + 商品代金 ¥651 → fallback で 651 を採用しない', () {
+      // 合計が完全にOCR崩れて検出できないが、商品代金は読めている場合
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: 'どど ピ セブ フン - イ ルレ ル ブン',
+          bbox: OcrBoundingBox(x: 10, y: 10, width: 300, height: 30),
+        ),
+        const OcrToken(
+          text: '商品代金 ¥651',
+          bbox: OcrBoundingBox(x: 10, y: 250, width: 100, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, isNot(651));
+      expect(result.merchantName, 'セブンイレブン');
+    });
+  });
+
+  group('Step23: ラベル近傍金額探索（T23-01〜T23-03）', () {
+    test('合計ラベル候補あり / 金額が2行下の右寄せ → 近傍探索で採用', () {
+      // ラベル行と金額行の間に「税率対象」のような無関係行が挟まる構成。
+      // Phase 1 通常ペアリング（同一行・直下1行）では金額が取れず、
+      // 修正前は fallback_suppressed_due_to_label_candidate で null。
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: '税率 8%対象',
+          bbox: OcrBoundingBox(x: 10, y: 150, width: 100, height: 20),
+        ),
+        const OcrToken(
+          text: '¥670',
+          bbox: OcrBoundingBox(x: 200, y: 200, width: 50, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, 670, reason: '近傍探索で正しい合計を採用');
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      expect(
+        trace.any((m) => m.contains('total_label_nearby')
+            && m.contains('amount=670')),
+        isTrue,
+        reason: 'total_label_nearby trace が出ること',
+      );
+    });
+
+    test('合計ラベル候補あり / 金額が直上の右寄せ列 → 近傍探索で採用', () {
+      // 湾曲レシートで金額行が合計行の上にずれるケース。
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '¥670',
+          bbox: OcrBoundingBox(x: 200, y: 100, width: 50, height: 20),
+        ),
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 150, width: 40, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, 670);
+    });
+
+    test('合計ラベル候補あり / 近傍に商品代金 ¥651 のみ → null（採用しない）',
+        () {
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: '商品代金 ¥651',
+          bbox: OcrBoundingBox(x: 10, y: 150, width: 120, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, isNot(651));
+      expect(result.totalAmount, isNull,
+          reason: '商品行の金額は近傍探索でも採用しない');
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      expect(
+        trace.any((m) =>
+            m.contains('fallback_suppressed_due_to_label_candidate')),
+        isTrue,
+      );
+    });
+
+    test('合計ラベル候補あり / 近傍に PayPay支払 ¥670 のみ → 採用しない', () {
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: 'PayPay支払 ¥670',
+          bbox: OcrBoundingBox(x: 10, y: 150, width: 150, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, isNot(670),
+          reason: '支払手段行は合計近傍候補から除外');
+    });
+
+    test('合計ラベル候補あり / 近傍に 税率 8%対象 ¥667 のみ → 採用しない',
+        () {
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: '税率 8%対象 ¥667',
+          bbox: OcrBoundingBox(x: 10, y: 150, width: 180, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, isNot(667));
+    });
+
+    test('合計ラベル候補あり / 商品代金 ¥651 + 2行下に 合計 ¥670 → 670', () {
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: '商品代金 ¥651',
+          bbox: OcrBoundingBox(x: 10, y: 150, width: 120, height: 20),
+        ),
+        const OcrToken(
+          text: '¥670',
+          bbox: OcrBoundingBox(x: 200, y: 200, width: 50, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, 670);
+    });
+
+    test('合計ラベル候補あり / 近傍候補なし → fallback_suppressed_due_to_label_candidate',
+        () {
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: 'お買い上げありがとうございました',
+          bbox: OcrBoundingBox(x: 10, y: 150, width: 200, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, isNull);
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      expect(
+        trace.any((m) =>
+            m.contains('fallback_suppressed_due_to_label_candidate')),
+        isTrue,
+      );
+    });
+
+    test('Step23 再発: セブンイレブン正規化 + 合計ラベル + 近傍金額 → 期待動作',
+        () {
+      // Step22後の実OCRログ相当: ラベルは検出されるが、Phase 1 通常ペアリング
+      // が失敗して null になるシナリオ。修正後は近傍探索で採用される。
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: 'どど ピ セブ フン - イ ルレ ル ブン',
+          bbox: OcrBoundingBox(x: 10, y: 10, width: 300, height: 30),
+        ),
+        const OcrToken(
+          text: '商品代金 ¥651',
+          bbox: OcrBoundingBox(x: 10, y: 250, width: 100, height: 20),
+        ),
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 300, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: '対象 8%',
+          bbox: OcrBoundingBox(x: 10, y: 350, width: 80, height: 20),
+        ),
+        const OcrToken(
+          text: '¥670',
+          bbox: OcrBoundingBox(x: 200, y: 400, width: 50, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.merchantName, 'セブンイレブン');
+      expect(result.totalAmount, 670);
+      expect(result.totalAmount, isNot(651));
+    });
+
+    test('label_candidate_found trace がラベル検出時に出る', () {
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: '¥670',
+          bbox: OcrBoundingBox(x: 200, y: 100, width: 50, height: 20),
+        ),
+      ];
+      ReceiptOcrService.extractFromTokens(tokens);
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      expect(
+        trace.any((m) => m.contains('label_candidate_found')
+            && m.contains('label=合計')),
+        isTrue,
+        reason: 'ラベル検出時に label_candidate_found を出すこと',
+      );
+    });
+  });
+
+  group('Step24: 近傍探索 偽陽性抑止（T24-01〜T24-05）', () {
+    test('weak_small_amount: 孤立通貨記号なし小額 148 は採用しない（再発再現）',
+        () {
+      // 実OCRログ相当の構成:
+      // line0=店名 / line2=チェーン断片 / line4=日付 / line5=148(孤立) /
+      // line6=合計 / line7=148(孤立) / line8=税率対象 / line9=148(孤立)
+      // line6 の合計ラベル直下/直上に通貨記号なしの孤立 148 のみが残るが
+      // 修正前は total_label_nearby で採用されていた。
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: 'どこ かのお店',
+          bbox: OcrBoundingBox(x: 10, y: 10, width: 200, height: 20),
+        ),
+        const OcrToken(
+          text: '住所表記',
+          bbox: OcrBoundingBox(x: 10, y: 50, width: 100, height: 20),
+        ),
+        const OcrToken(
+          text: '電話 03-0000-0000',
+          bbox: OcrBoundingBox(x: 10, y: 90, width: 200, height: 20),
+        ),
+        const OcrToken(
+          text: '2026年04月26日',
+          bbox: OcrBoundingBox(x: 10, y: 130, width: 200, height: 20),
+        ),
+        const OcrToken(
+          text: '148',
+          bbox: OcrBoundingBox(x: 80, y: 200, width: 30, height: 20),
+        ),
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 240, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: '内消費税等',
+          bbox: OcrBoundingBox(x: 10, y: 280, width: 100, height: 20),
+        ),
+        const OcrToken(
+          text: '148',
+          bbox: OcrBoundingBox(x: 80, y: 320, width: 30, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, isNot(148),
+          reason: '通貨記号なしの孤立小額 148 を合計として採用しない');
+      expect(result.totalAmount, isNull,
+          reason: '安全な合計金額が無い場合は null');
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      expect(
+        trace.any((m) => m.contains('weak_small_amount')
+            || m.contains('neighbor_excluded_context')
+            || m.contains('fallback_suppressed_due_to_label_candidate')),
+        isTrue,
+        reason: '弱い小額または隣接文脈の reject trace が出ること',
+      );
+    });
+
+    test('weak_small_amount: 同一行右側で通貨記号なしの 670 は採用する', () {
+      // 同一行右側はラベルから直接ペアリング可能なので、通貨記号なしでも OK。
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: '670',
+          bbox: OcrBoundingBox(x: 200, y: 100, width: 40, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, 670,
+          reason: '同一行右側の通貨記号なし金額は強い位置関係として採用可');
+    });
+
+    test('weak_small_amount: 通貨記号付き 670 は近傍で採用される（緩和維持）',
+        () {
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: 'ありがとうございました',
+          bbox: OcrBoundingBox(x: 10, y: 150, width: 200, height: 20),
+        ),
+        const OcrToken(
+          text: '¥670',
+          bbox: OcrBoundingBox(x: 200, y: 200, width: 50, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, 670,
+          reason: '通貨記号ありは弱小額ガードに引っかからない');
+    });
+
+    test('neighbor_excluded_context: 内消費税等 隣接の通貨記号なし小額は採用しない',
+        () {
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: '内消費税等',
+          bbox: OcrBoundingBox(x: 10, y: 150, width: 100, height: 20),
+        ),
+        const OcrToken(
+          text: '148',
+          bbox: OcrBoundingBox(x: 80, y: 200, width: 30, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, isNot(148));
+      expect(result.totalAmount, isNull);
+    });
+
+    test('neighbor_excluded_context: 商品代金行の隣接に通貨記号付き ¥670 → 採用維持',
+        () {
+      // Step23 既存テスト維持: 通貨記号ありなら隣接文脈除外の対象外
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: '商品代金 ¥651',
+          bbox: OcrBoundingBox(x: 10, y: 150, width: 120, height: 20),
+        ),
+        const OcrToken(
+          text: '¥670',
+          bbox: OcrBoundingBox(x: 200, y: 200, width: 50, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, 670,
+          reason: '通貨記号付きは商品系隣接でも採用可（既存仕様）');
+    });
+
+    test('total_label_below_line: 合計直下に通貨記号なし 148 単独は採用しない'
+        '（r56 H-1 再発防止）', () {
+      // r56 H-1: Step24 ガードが _searchNearbyTotalAmounts のみに閉じていたため、
+      // OCR の行分割で `合計` 直下行に `148` 単独 token だけが残ると、
+      // total_label_below_line 経路で誤採用される問題があった。
+      // 修正後は同経路にも弱小額ガードが適用され、null を返す。
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: '148',
+          bbox: OcrBoundingBox(x: 80, y: 150, width: 30, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, isNot(148),
+          reason: '合計直下の通貨記号なし 148 単独は採用しない');
+      expect(result.totalAmount, isNull,
+          reason: '安全な合計候補がなければ null');
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      expect(
+        trace.any((m) =>
+            m.contains('weak_small_amount') ||
+            m.contains('fallback_suppressed_due_to_label_candidate')),
+        isTrue,
+        reason: '直下行ペアリングからの reject trace が出ること',
+      );
+    });
+
+    test('neighbor_excluded_context r57: 合計+直下148+隣接「税率8%対象 148」'
+        '同一列でも採用しない（r57 H-1 再発防止）', () {
+      // r57 H-1: 候補行近傍に通常の `合計` ラベル行があるだけで税系除外を
+      // 緩和すると、税率行と整列した通貨記号なし小額が再採用される。
+      // 修正後は候補行自身が「税込合計 / 合計(税込)」のような共存表現で
+      // ない限り税系除外は緩和されない。さらに整列基準計算からも
+      // 除外文脈行（税率/商品代金/支払/伝票番号 等）の金額tokenが弾かれる。
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        // 直下の通貨記号なし 148（誤誘導候補）
+        const OcrToken(
+          text: '148',
+          bbox: OcrBoundingBox(x: 120, y: 140, width: 30, height: 20),
+        ),
+        // 隣接行の税率対象テキスト+148（同じ右端Xで整列）
+        const OcrToken(
+          text: '税率 8%対象',
+          bbox: OcrBoundingBox(x: 10, y: 180, width: 130, height: 20),
+        ),
+        const OcrToken(
+          text: '148',
+          bbox: OcrBoundingBox(x: 120, y: 180, width: 30, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, isNot(148),
+          reason: '隣接の税率行と整列していても通貨記号なし 148 は採用しない');
+      expect(result.totalAmount, isNull,
+          reason: '安全な合計候補がなければ null');
+    });
+
+    test('neighbor_excluded_context r57: 合計(税込) 同一行 ¥670 は採用維持', () {
+      // 候補行自身が `合計(税込)` のような共存表現の場合は税系除外を緩める
+      // ことを確認（同一行なのでガードは作動しないが、回帰確認として残す）
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計(税込)',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 80, height: 20),
+        ),
+        const OcrToken(
+          text: '¥670',
+          bbox: OcrBoundingBox(x: 200, y: 100, width: 50, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, 670,
+          reason: '合計(税込) 同一行ペアリングは維持');
+    });
+
+    test('neighbor_excluded_context r57: 税込合計 同一行 ¥670 は採用維持', () {
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '税込合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 80, height: 20),
+        ),
+        const OcrToken(
+          text: '¥670',
+          bbox: OcrBoundingBox(x: 200, y: 100, width: 50, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, 670,
+          reason: '税込合計 同一行ペアリングは維持');
+    });
+
+    test('total_label_below_line: 合計直下の通貨記号付き ¥670 は採用維持'
+        '（r56 回帰）', () {
+      // 直下行ペアリングへガードを追加した影響で通貨記号付き金額が壊れないことを確認
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: '¥670',
+          bbox: OcrBoundingBox(x: 80, y: 150, width: 50, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, 670,
+          reason: '通貨記号付きはガードを通過し、直下行ペアリングで採用される');
+    });
+
+    test('weak_alignment: 2行差の通貨記号なし小額は採用しない', () {
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: 'ご利用ありがとうございました',
+          bbox: OcrBoundingBox(x: 10, y: 150, width: 200, height: 20),
+        ),
+        const OcrToken(
+          text: '148',
+          bbox: OcrBoundingBox(x: 80, y: 200, width: 30, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, isNot(148));
+      expect(result.totalAmount, isNull);
+    });
+
+    test('セフン: 雪 セフン - イ ル ブ ン → セブンイレブン に正規化', () {
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '雪 セフン - イ ル ブ ン',
+          bbox: OcrBoundingBox(x: 10, y: 10, width: 250, height: 30),
+        ),
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: '¥670',
+          bbox: OcrBoundingBox(x: 200, y: 100, width: 50, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.merchantName, 'セブンイレブン');
+    });
+
+    test('セフン: セフン - イ ル ブン → セブンイレブン に正規化', () {
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: 'セフン - イ ル ブン',
+          bbox: OcrBoundingBox(x: 10, y: 10, width: 200, height: 30),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.merchantName, 'セブンイレブン');
+    });
+
+    test('セフン 負例: フン イ ル ブン 単独では セブンイレブン にしない', () {
+      // セフン まとまり or セ+フン 隣接が無いと group A 不成立
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: 'フン イ ル ブン',
+          bbox: OcrBoundingBox(x: 10, y: 10, width: 200, height: 30),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.merchantName, isNot('セブンイレブン'));
+    });
+
+    test('セブン銀行 / セブンスター / セブンカフェ 等の負例維持', () {
+      for (final name in ['セブン銀行', 'セブンスター', 'セブンティーンアイス',
+          'セブンカフェ']) {
+        final tokens = [
+          OcrToken(
+            text: name,
+            bbox: const OcrBoundingBox(x: 10, y: 10, width: 200, height: 30),
+          ),
+        ];
+        final result = ReceiptOcrService.extractFromTokens(tokens);
+        expect(result.merchantName, isNot('セブンイレブン'),
+            reason: '$name は セブンイレブン に誤補正しない');
+      }
+    });
+
+    test('trace拡張: total_label_nearby採用traceに line_idx と delta を含む', () {
+      // 合計ラベルと金額が直下では取れない位置関係 → 近傍探索ルートに入る
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: 'ありがとうございました',
+          bbox: OcrBoundingBox(x: 10, y: 150, width: 200, height: 20),
+        ),
+        const OcrToken(
+          text: '¥670',
+          bbox: OcrBoundingBox(x: 200, y: 200, width: 50, height: 20),
+        ),
+      ];
+      ReceiptOcrService.extractFromTokens(tokens);
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      expect(
+        trace.any((m) =>
+            m.contains('total_label_nearby') &&
+            m.contains('line_idx=') &&
+            m.contains('label_line_idx=') &&
+            m.contains('delta=') &&
+            m.contains('has_currency=')),
+        isTrue,
+        reason: '採用traceに line_idx / label_line_idx / delta / has_currency を含む',
+      );
+    });
+  });
+
+  group('Step25: 候補可視化trace（T25-01〜T25-04）', () {
+    /// Step25 の Current Reproduction Log 相当を再現する共通 fixture。
+    /// - 合計ラベル候補が `合計 内消費税等` 同一擬似行で検出される
+    /// - 通貨記号なし 230 が delta=-2 で `weak_alignment` reject
+    /// - 通貨記号なし 148 が delta=-1、強整列通過後に
+    ///   `neighbor_excluded_context`（合計行の `内消費税等` 隣接）で reject
+    /// - 結果として totalAmount=null、fallback_suppressed_due_to_label_candidate
+    List<OcrToken> buildStep25ReproTokens() {
+      return const <OcrToken>[
+        // line0: merchant fragment（セブンイレブン正規化対象）
+        OcrToken(
+          text: '雪 セフン - イ ル ブ ン',
+          bbox: OcrBoundingBox(x: 10, y: 10, width: 250, height: 30),
+        ),
+        // line1: 住所相当（PII を直接含めず汎用文字列で模擬）
+        OcrToken(
+          text: '店舗所在地表記',
+          bbox: OcrBoundingBox(x: 10, y: 60, width: 200, height: 20),
+        ),
+        // line2: 電話番号相当（数字のみで模擬、桁構成は本物に近い）
+        OcrToken(
+          text: 'TEL 00-0000-0000',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 200, height: 20),
+        ),
+        // line3: 日付
+        OcrToken(
+          text: '2026年04月26日',
+          bbox: OcrBoundingBox(x: 10, y: 140, width: 200, height: 20),
+        ),
+        // line4: 通貨記号なし 230（合計から delta=-2 → weak_alignment）
+        // right_edge_X=230（列整列の基準値）
+        OcrToken(
+          text: '230',
+          bbox: OcrBoundingBox(x: 200, y: 180, width: 30, height: 20),
+        ),
+        // line5: 通貨記号なし 148（合計から delta=-1）
+        // right_edge_X=230（line4 と整列 → 強整列通過）
+        // 隣接窓 [line4, line6] のうち line6 に 内消費税等 があるため
+        // neighbor_excluded_context で reject される
+        OcrToken(
+          text: '148',
+          bbox: OcrBoundingBox(x: 200, y: 220, width: 30, height: 20),
+        ),
+        // line6: 合計 label + 内消費税等（同 y 軸 → 同一擬似行）
+        // 合計 token がラベル検出対象、内消費税等 token が
+        // 148 の隣接窓に税系コンテキストを供給する
+        OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 260, width: 40, height: 20),
+        ),
+        OcrToken(
+          text: '内消費税等',
+          bbox: OcrBoundingBox(x: 80, y: 260, width: 100, height: 20),
+        ),
+      ];
+    }
+
+    test('T25-01 実OCRログ相当: merchant=セブンイレブン / total=null / '
+        'weak_alignment 230 + neighbor_excluded_context 148 + '
+        'fallback_suppressed_due_to_label_candidate を固定', () {
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = buildStep25ReproTokens();
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      // (1) merchant 正規化が維持される
+      expect(result.merchantName, 'セブンイレブン',
+          reason: 'セフン正規化（merchantCandidate normalized chain）は維持');
+      // 結果として安全な合計候補がなく null
+      expect(result.totalAmount, isNot(230),
+          reason: '弱整列・通貨記号なしの 230 は採用しない');
+      expect(result.totalAmount, isNot(148),
+          reason: '税系隣接の通貨記号なし 148 は採用しない');
+      expect(result.totalAmount, isNull,
+          reason: '安全な合計候補がなければ null を返す');
+
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      // (2) merchant trace: chain=セブンイレブン に正規化された記録が残る
+      expect(
+        trace.any((m) =>
+            m.contains('merchantCandidate normalized') &&
+            m.contains('chain=セブンイレブン')),
+        isTrue,
+        reason: 'merchantCandidate normalized chain=セブンイレブン を固定',
+      );
+      // (3) 230 が weak_alignment で reject されたことを固定
+      expect(
+        trace.any((m) =>
+            m.contains('weak_small_amount_rejected') &&
+            m.contains('reason=weak_alignment') &&
+            m.contains('amount=230')),
+        isTrue,
+        reason: '通貨記号なし 230 は delta=-2 で weak_alignment reject される',
+      );
+      // (4) 148 が neighbor_excluded_context で reject されたことを固定
+      expect(
+        trace.any((m) =>
+            m.contains('weak_small_amount_rejected') &&
+            m.contains('reason=neighbor_excluded_context') &&
+            m.contains('amount=148')),
+        isTrue,
+        reason: '通貨記号なし 148 は強整列通過後、税系隣接により '
+            'neighbor_excluded_context で reject される',
+      );
+      // (5) ラベル候補ありの最終フォールバック抑止 trace
+      expect(
+        trace.any((m) => m.contains('label_candidate_found')),
+        isTrue,
+        reason: '合計ラベル候補は検出される',
+      );
+      expect(
+        trace.any((m) =>
+            m.contains('fallback_suppressed_due_to_label_candidate')),
+        isTrue,
+        reason: 'ラベル候補ありの最終フォールバック抑止 trace が必ず出る',
+      );
+    });
+
+    test('T25-02 ラベル近傍スキャンtrace: scan_start / scan_line / scan_summary', () {
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = buildStep25ReproTokens();
+      ReceiptOcrService.extractFromTokens(tokens);
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      expect(
+        trace.any((m) =>
+            m.contains('scan_start') &&
+            m.contains('label_line_idx=') &&
+            m.contains('token_count=')),
+        isTrue,
+        reason: 'scan_start に label_line_idx と token_count が含まれる',
+      );
+      expect(
+        trace.any((m) =>
+            m.contains('scan_line') &&
+            m.contains('line_idx=') &&
+            m.contains('label_line_idx=') &&
+            m.contains('delta=') &&
+            m.contains('has_currency=') &&
+            m.contains('classification=')),
+        isTrue,
+        reason: 'scan_line にライン位置・通貨情報・分類が含まれる',
+      );
+      expect(
+        trace.any((m) =>
+            m.contains('scan_summary') &&
+            m.contains('label_line_idx=') &&
+            m.contains('rejected_candidates=')),
+        isTrue,
+        reason: 'scan_summary が出力される',
+      );
+    });
+
+    test('T25-03 amount inventory: ラベル候補あり×total=null のときに'
+        ' inventory が出力される', () {
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = buildStep25ReproTokens();
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, isNull, reason: '前提: total=null である');
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      expect(
+        trace.any((m) =>
+            m.contains('amount_inventory_start') &&
+            m.contains('reason=label_present_total_null')),
+        isTrue,
+        reason: 'inventory_start が label候補×total=null の条件で出る',
+      );
+      expect(
+        trace.any((m) =>
+            m.contains('amount_inventory ') &&
+            m.contains('line_idx=') &&
+            m.contains('classification=')),
+        isTrue,
+        reason: 'inventory 各行に分類が含まれる',
+      );
+      expect(
+        trace.any((m) =>
+            m.contains('amount_inventory_summary') &&
+            m.contains('total_candidates=')),
+        isTrue,
+        reason: 'inventory_summary が出力される',
+      );
+    });
+
+    test('T25-02/T25-03 success-case: total が確定するケースでは '
+        'scan_* / amount_inventory_* を一切出さない', () {
+      // 合計ラベル候補と通貨記号付き ¥670 が安全に取れるケース
+      ReceiptOcrService.resetCandidateTrace();
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 100, width: 40, height: 20),
+        ),
+        const OcrToken(
+          text: '¥670',
+          bbox: OcrBoundingBox(x: 200, y: 100, width: 50, height: 20),
+        ),
+      ];
+      final result = ReceiptOcrService.extractFromTokens(tokens);
+      expect(result.totalAmount, 670, reason: '近傍通貨記号付き 670 は採用される');
+      final trace = ReceiptOcrService.lastCandidateTrace;
+      // H-2: 成功ケースで scan_start / scan_line / scan_summary を出さない
+      expect(
+        trace.any((m) => m.contains('scan_start')),
+        isFalse,
+        reason: 'total が確定すれば近傍スキャン scan_start は出さない',
+      );
+      expect(
+        trace.any((m) => m.contains('scan_line')),
+        isFalse,
+        reason: 'total が確定すれば scan_line は出さない',
+      );
+      expect(
+        trace.any((m) => m.contains('scan_summary')),
+        isFalse,
+        reason: 'total が確定すれば scan_summary は出さない',
+      );
+      // H-2: 成功ケースで amount_inventory_* を出さない
+      expect(
+        trace.any((m) => m.contains('amount_inventory_start')),
+        isFalse,
+        reason: 'total が確定すれば inventory_start は出さない',
+      );
+      expect(
+        trace.any((m) => m.contains('amount_inventory_summary')),
+        isFalse,
+        reason: 'total が確定すれば inventory_summary は出さない',
+      );
+    });
+
+    test('T25-04 PII 非保存: traceに住所/電話/会員/伝票番号原文が出ない', () {
+      ReceiptOcrService.resetCandidateTrace();
+      // PII 風の文字列を含めても、traceには行原文や番号全文が出ないこと
+      const sensitiveAddress = '東京都千代田区丸の内1-2-3-456号室';
+      const sensitivePhone = '03-1234-5678';
+      const sensitiveMember = '会員番号 1234567890123456';
+      const sensitiveSerial = '伝票番号 ABCDEF-987654-XYZ';
+      final tokens = <OcrToken>[
+        const OcrToken(
+          text: 'セブン-イレブン',
+          bbox: OcrBoundingBox(x: 10, y: 10, width: 250, height: 30),
+        ),
+        const OcrToken(
+          text: sensitiveAddress,
+          bbox: OcrBoundingBox(x: 10, y: 60, width: 300, height: 20),
+        ),
+        OcrToken(
+          text: 'TEL $sensitivePhone',
+          bbox: const OcrBoundingBox(x: 10, y: 100, width: 220, height: 20),
+        ),
+        const OcrToken(
+          text: sensitiveMember,
+          bbox: OcrBoundingBox(x: 10, y: 140, width: 280, height: 20),
+        ),
+        const OcrToken(
+          text: sensitiveSerial,
+          bbox: OcrBoundingBox(x: 10, y: 180, width: 280, height: 20),
+        ),
+        const OcrToken(
+          text: '230',
+          bbox: OcrBoundingBox(x: 60, y: 220, width: 30, height: 20),
+        ),
+        const OcrToken(
+          text: '内消費税等',
+          bbox: OcrBoundingBox(x: 10, y: 260, width: 100, height: 20),
+        ),
+        const OcrToken(
+          text: '148',
+          bbox: OcrBoundingBox(x: 200, y: 260, width: 30, height: 20),
+        ),
+        const OcrToken(
+          text: '合計',
+          bbox: OcrBoundingBox(x: 10, y: 300, width: 40, height: 20),
+        ),
+      ];
+      ReceiptOcrService.extractFromTokens(tokens);
+      final joined = ReceiptOcrService.lastCandidateTrace.join('\n');
+      expect(joined.contains(sensitiveAddress), isFalse,
+          reason: '住所原文を trace に出さない');
+      expect(joined.contains(sensitivePhone), isFalse,
+          reason: '電話番号原文を trace に出さない');
+      expect(joined.contains('1234567890123456'), isFalse,
+          reason: '会員番号全文を trace に出さない');
+      expect(joined.contains('ABCDEF-987654-XYZ'), isFalse,
+          reason: '伝票番号全文を trace に出さない');
+      expect(joined.contains('丸の内'), isFalse,
+          reason: '住所断片を trace に出さない');
+      // OCR 行原文（任意のtoken text）が trace に直接出ていないことの追加確認
+      expect(joined.contains('TEL 03-1234-5678'), isFalse,
+          reason: 'OCR 行原文を trace に出さない');
     });
   });
 }

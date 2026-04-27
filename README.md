@@ -464,6 +464,302 @@ flutter test      # 全テスト
 flutter build web # Webビルド
 ```
 
+## レシートOCR誤抽出ハードニング (Step 21)
+
+Step 19 で扱いきれなかった「OCR は通るが誤った候補が勝つ」ケースをハードニングしました。
+代表サンプルは `docs/sample/IMG_1783.jpg`（OCR 抽出はできるが `total=228215` / `merchant=どど ピ セブ フン - イ ルレ ル ブン` のような誤抽出が発生していた）。
+
+### 主な改善点
+
+#### 1. 不安全コンテキストの除外
+- 伝票番号 `# 1234567890` / 電話番号 `03-1234-5678` / 会員コード行などを `isUnsafeAmountContext` で検出して fallback 候補から除外
+- 通貨記号（`¥` / `\` / `円`）を持たない6桁以上の純数字行（伝票番号の典型形）も除外
+- 既存の `totalExcludeKeywords`（`支払` / `PayPay` / `税率` 等）と独立した `amountUnsafeContextKeywords` で reject 理由を区別
+
+#### 2. 合計ラベルの fuzzy 正規化
+- OCR 部品分解の吸収:
+  - `合 言十` / `合言十` → `合計`
+  - `谷 計` / `台 計` → `合計`
+- weight 0.7 でフォールバック適用（通常の `合計` weight 1.0 が当たらないときのみ）
+- 誤吸収防止: 直近に `合計から` のような否定文脈がある場合はスキップ
+
+#### 3. 合計ラベル直下行の金額ペアリング
+- 湾曲したレシートで「合計」とその金額が同一行に乗らないケースに対応
+- ラベル直下（Y=labelBottom 近傍）の amount を score 2.0 で採用
+- 既存の Y-overlap チェック（labelHeight × 0.6）で税率行などとの混同を防止
+
+#### 4. チェーン名の正規化（セブンイレブン）
+- 部品断片の共起（`セブン` + `イレブン`、`セブ` + `ブン`、`レブン` 等）から正規化された店名を出力
+- 1文字断片・純数字断片は誤マッチ防止のため棄却
+- 既存の `merchantExcludeKeywords` を上書きするため、誤抽出された崩れトークンが採用されていてもチェーン名で置き換える
+
+#### 5. 候補トレース機構（debug-only）
+- `assert()` ベースのため release ビルドではコスト 0
+- `ReceiptOcrService.lastCandidateTrace` で各候補の accept/reject 理由を確認可能
+- ログ例:
+  - `totalCandidate accepted reason=total_label_same_line amount=670 weight=1.0`
+  - `totalCandidate rejected reason=unsafe_context amount=228215`
+  - `merchantCandidate normalized chain=セブンイレブン source=fragments`
+
+### IMG_1783.jpg の確認手順（モバイル実機）
+
+1. `docs/sample/IMG_1783.jpg` を端末に転送
+2. アプリの支出追加画面で「レシート読み取り」→ サンプル画像を選択
+3. 確認ダイアログで以下を確認:
+   - **店名**: `セブンイレブン`（または `セブン-イレブン` の正規化形式）
+   - **合計金額**: `¥670`
+4. デバッグログ（debugPrint）で以下が出力されることを確認:
+   - 期待ログ:
+     ```
+     ReceiptOcrService.candidate: totalCandidate accepted reason=total_label_same_line amount=670 weight=1.0
+     ReceiptOcrService.candidate: merchantCandidate normalized chain=セブンイレブン source=fragments
+     ```
+   - NG ログ（修正前の挙動、現在は出ないこと）:
+     ```
+     total=228215   ← 伝票番号の誤採用
+     merchant=どど ピ セブ フン - イ ルレ ル ブン   ← OCR 崩れトークンの誤採用
+     ```
+
+### PII 非保存ポリシー（再掲）
+
+- レシート画像・OCR 全文・抽出された店名は端末外に送信されない
+- ログには PII を含めない:
+  - format / bytes / dimensions / token count / label と weight / 採用された amount のみ
+  - 候補トレースも理由（reason）と数値（amount）程度に留め、原文はログ化しない
+- 監査ログとしての保存は行わない（trace は `_candidateTrace` に最後の1回分のみ揮発保持）
+
+### Step 21 確認手順
+```bash
+flutter analyze   # 静的解析
+flutter test      # 全テスト
+flutter build web # Webビルド（Webパススルー経路に変更があるため必須）
+```
+
+## レシートOCR 実OCR再発ログ対応 (Step 22)
+
+Step 21 修正後も `docs/sample/IMG_1783.jpg` の実OCRで `merchant=どど ピ セブ フン - イ ルレ ル ブン` / `total=651`（`商品代金` 由来の通貨付き金額が `fallback_currency_bbox` で採用される）誤抽出が再発したため、追加でハードニングしました。
+
+### 主な改善点
+
+#### 1. bottom-up 合計ラベル探索
+- bbox 経路 (`extractTotalFromTokens`) の Phase 1 を pseudoLines 下→上の走査へ変更
+- 同 weight の場合は最下部に出現したラベル候補を優先（レシート最終合計が下部に出ることに合致）
+- text 経路 (`extractTotal`) も同様に下から走査
+- `合計 ¥500 / PayPay支払 / 合計 ¥670` のような並びでは下の `670` を採用
+
+#### 2. 商品行 fallback 抑制
+- `totalFallbackExcludeKeywords` (`商品代金` / `商品` / `単価` / `点数` / `数量` / `対象商品`) を Phase 2 fallback 限定で除外
+- `商品代金 ¥651` 単独行は通貨付きでも合計として採用しない
+- ラベル候補が文書内に1つでも存在し金額ペアリング不能な場合、`fallback_suppressed_due_to_label_candidate` で `null` を返却（誤入力より未取得を優先）
+
+#### 3. ロゴ崩れトークンの内部セグメント化
+- `_segmentChainText` で空白・ハイフン類（`-`/`－`/`ー` など）・中黒・`/`・`|` を区切りにトークンを分割
+- group A（seven 系）と group B（eleven 系）が**異なる**セグメントに出る場合のみチェーン名確定
+- 同一セグメント内（例: `セブンスター`）の重複断片は不採用 → Round52 負例（`セブンスター` / `セブン銀行` / `セブンティーン` 等）を維持
+- `ピ セブ フン - イ ルレ ル ブン` のように1トークンに潰れたケースでも `セブンイレブン` に正規化
+
+### IMG_1783.jpg の確認手順（モバイル実機）
+
+1. `docs/sample/IMG_1783.jpg` を端末に転送
+2. アプリの支出追加画面で「レシート読み取り」→ サンプル画像を選択
+3. 確認ダイアログで以下を確認:
+   - **店名**: `セブンイレブン`
+   - **合計金額**: 実レシートの `合計` 行の金額（`商品代金` 由来の `¥651` ではない）
+4. デバッグログ（debugPrint）で以下を確認:
+   - 期待ログ（OK）:
+     ```
+     ReceiptOcrService.candidate: totalCandidate accepted reason=total_label_same_line amount=...
+     ReceiptOcrService.candidate: merchantCandidate normalized chain=セブンイレブン source=fragments
+     ```
+   - NG ログ（修正前の挙動、現在は出ないこと）:
+     ```
+     totalCandidate accepted reason=fallback_currency_bbox amount=651   ← 商品代金 ¥651 の誤採用
+     merchant=どど ピ セブ フン - イ ルレ ル ブン                          ← セグメント化前の生文字列
+     ```
+5. 合計ラベルが完全にOCR崩れて検出できないケースでは、`商品代金 ¥651` を採用せず未取得（手入力）に戻ることを確認
+
+### PII 非保存ポリシー（再掲）
+
+- 候補トレースは reason / amount / weight / label 種別 / line_idx に限定し、原文行は出さない
+- `商品代金` の reject 理由は `product_line_fallback`、ラベル候補存在時の抑制理由は `fallback_suppressed_due_to_label_candidate` として観測可能
+
+### Step 22 確認手順
+```bash
+flutter analyze
+flutter test
+flutter build web
+```
+
+## レシートOCR ラベル近傍探索 (Step 23)
+
+Step 22 の `fallback_suppressed_due_to_label_candidate` で `total=null` になる実OCRログ（`merchant=セブンイレブン` 正規化済みだが、`合計` ラベルが OCR で同一行/直下行に金額を捉えられず未取得）に対応して、ラベル候補の上下2行を対象に金額をスコア探索する処理を追加しました。
+
+### 主な改善点
+
+#### 1. ラベル近傍金額探索 (`_searchNearbyTotalAmounts`)
+- Phase 1 通常ペアリングが空振りした場合、検出済みラベル候補（`labelCandidates`）の上下2行を対象に金額を再探索
+- 位置スコア: 同一行 2.5 / 直下 2.2 / 直上 1.8 / ±2行 1.4
+- 加算: ラベル weight × 0.5、ラベルより右なら +0.5 / 左or同位は +0.1、`¥`/`円` 通貨記号 +0.2
+- Y距離ペナルティ: ラベル中心と金額中心のY距離 / ラベル高さ × 0.05（最大 0.4）
+- スコア閾値 1.5 を超える最高スコアの金額を採用（同 weight 同士の比較）
+- Step 22 の `fallback_suppressed_due_to_label_candidate` ガードは維持。近傍探索でヒットすれば `null` ではなく値を返す
+
+#### 2. 近傍候補の除外
+- `isUnsafeAmountContext`（連番・電話・郵便など）でフィルタ
+- `totalExcludeKeywords` + `totalFallbackExcludeKeywords`（商品代金 / PayPay支払 / 税率 / 単価 / 点数 等）を含む行は除外
+- `_isFallbackSafeAmount` で通貨記号がない金額（連番混在のリスク）を除外
+- 同一行ではラベルより左の金額（バーコード等）を採用しない
+
+#### 3. PII 非保存トレース拡張
+- `label_candidate_found`: ラベル候補検出時の line_idx / weight
+- `total_label_nearby`: 近傍探索採用時の amount / weight
+- `nearby_amount_rejected`: 除外理由 `excluded_context` / `unsafe_context` / `no_currency_mark` / `below_threshold`
+- 既存 `fallback_suppressed_due_to_label_candidate`: 近傍探索もヒットしなかった場合のみ出る
+
+#### 4. チェーン名 source トレース（Step22 N-2 統合）
+- `merchantCandidate normalized chain=... source={exact|fragments|segmented_fragments}`
+- `segmented_fragments`: 単一トークン内の `_segmentChainText` 分割によりA/B両群を同一トークンから抽出した経路
+- `fragments`: 複数トークンに跨る通常の断片合成
+- 監査時に「Step22 セグメント化が実際に機能したか」を観測可能
+
+### 確認手順（モバイル実機）
+
+1. `docs/sample/IMG_1783.jpg` のように `合計` ラベルが上下行に分離した実レシートを支出追加画面で読み取り
+2. デバッグログで以下を確認:
+   - 期待ログ（OK）:
+     ```
+     ReceiptOcrService.candidate: totalCandidate label_candidate_found label=合計 weight=1.0 line_idx=2
+     ReceiptOcrService.candidate: totalCandidate accepted reason=total_label_nearby amount=670 weight=1.0
+     ```
+   - NG ログ（修正前の挙動、現在は出ないこと）:
+     ```
+     totalCandidate fallback_suppressed_due_to_label_candidate   ← 近傍探索も空振りの場合のみ許容
+     ```
+3. `商品代金 ¥651` のみで `合計` 行が完全に欠落するレシートでは、`fallback_suppressed_due_to_label_candidate` のまま `null` 返却（手入力に戻る）であることを確認
+
+### Step 23 確認手順
+```bash
+flutter analyze
+flutter test
+flutter build web
+```
+
+## レシートOCR 近傍探索 偽陽性抑止 (Step 24)
+
+Step 23 で追加した `total_label_nearby` が、実OCRで税額/内消費税系の孤立小額 `148`（通貨記号なし）を採用してしまう再発に対応しました。あわせて、OCRが `セブン` を `セフン` と誤読するケース（`雪 セフン - イ ル ブ ン`）の店名正規化も追加しています。
+
+### 主な改善点
+
+#### 1. 弱い小額のガード (`weak_small_amount` / `weak_alignment`)
+- `_searchNearbyTotalAmounts()` と `total_label_below_line` 直下行ペアリングに、通貨記号なし `amount <= 999` 専用の追加ガードを実装
+- 採用条件:
+  - 同一行（delta=0）でラベル token より右側にある、または
+  - 強い列整列（近傍領域の他の金額 token 右端 X 中央値と `max(40px, 推定画像幅 * 0.03)` 相当以内）が確認できる
+- 2行差（|delta| ≥ 2）の通貨記号なし小額は原則 reject (`weak_alignment`)
+- 既存の `_isFallbackSafeAmount()` のグローバル仕様変更は避け、合計ラベル起点経路内に閉じた追加ガード
+
+#### 2. 隣接文脈による除外 (`neighbor_excluded_context`)
+- 通貨記号なし小額のみ、候補行の前後1行に以下があれば棄却:
+  - 税系: `税率` / `対象` / `内税` / `外税` / `消費税` / `税額`
+  - 商品系: `商品代金` / `商品` / `単価` / `点数` / `数量` / `対象商品`
+  - 支払系: `PayPay` / `支払` / `現金` / `カード` / `電子マネー` / `預り` / `お預り` / `お釣り` / `おつり`
+- 税系除外の緩和は、候補行自身に `合計(税込)` / `税込合計` / `ご請求(税込)` のような強い合計ラベルと税系語が共存する場合に限定
+- 隣接行に通常の `合計` ラベルがあるだけでは税系除外を緩和しない
+- 通貨記号付き金額は隣接文脈除外の対象外（Step23 の既存挙動を維持）
+
+#### 3. trace 拡張
+- 採用 trace: `total_label_nearby amount=... weight=... line_idx=... label_line_idx=... delta=... has_currency=... score=...`
+- 棄却理由: `weak_small_amount` / `weak_alignment` / `neighbor_excluded_context`
+- PII 非保存（行原文・OCR全文・住所・電話番号・会員番号は出さない）
+
+#### 4. 店名正規化: `セフン` 系 OCR 揺れ対応
+- `MerchantChainRule` のセブンイレブン group A に `セフン` を追加（2文字以上のまとまりとしてのみ認定）
+- `_matchChainRuleWithSource()` の group B 検査で「同一 source idx の nonA セグメント連結」マッチを補助追加
+  - `雪 セフン - イ ル ブ ン` のように1トークンが1文字単位に分かれても `イルブン` 連結で `ブン` を再構成可能
+- 単独 `フン` だけでは group A 不成立 → `フン イ ル ブン` は誤補正しない
+- `セブン銀行` / `セブンスター` / `セブンティーンアイス` / `セブンカフェ` 等の負例は維持
+
+### 確認手順（モバイル実機）
+
+1. `合計` ラベル直近に税額/内税系の孤立小額（通貨記号なし）が並ぶレシートを支出追加画面で読み取り
+2. デバッグログで以下を確認:
+   - 期待ログ（OK）:
+     ```
+     ReceiptOcrService.candidate: totalCandidate label_candidate_found label=合計 weight=1.0 line_idx=...
+     ReceiptOcrService.candidate: totalCandidate nearby_amount_rejected reason=weak_small_amount line_idx=... amount=148 has_currency=false delta=...
+     ReceiptOcrService.candidate: totalCandidate accepted reason=total_label_nearby amount=<実合計> ... has_currency=true score=...
+     ```
+   - または安全な合計が無い場合:
+     ```
+     ReceiptOcrService.candidate: totalCandidate rejected reason=fallback_suppressed_due_to_label_candidate
+     ReceiptOcrService: 抽出結果 ... total=null
+     ```
+   - NG ログ（修正前の挙動、現在は出ないこと）:
+     ```
+     totalCandidate accepted reason=total_label_nearby amount=148   ← 通貨記号なし小額の誤採用
+     merchant=雪 セフン - イ ル ブ ン                                ← 正規化失敗
+     ```
+3. 結果確認ダイアログで以下を確認:
+   - 店名: `セブンイレブン`（`セフン` 系の OCR 揺れも吸収）
+   - 合計金額: 実レシート上の `合計` 行金額、または安全に取れない場合は空欄
+
+### Step 24 確認手順
+```bash
+flutter analyze
+flutter test
+flutter build web
+```
+
+## レシートOCR 合計未取得 原因可視化 (Step 25)
+
+Step24後の実OCRで `merchant=セブンイレブン` まで正規化でき、`230` / `148` の誤採用も防げている一方、`total=null` になるケースを分析するための候補スキャンtraceを追加します。Step25では抽出条件を緩めず、正しい合計金額tokenがOCR結果に存在するかを判定できるログ整備に限定します。
+
+### 目的
+
+- `合計` ラベル候補が存在するのに `total=null` になった場合、正しい金額tokenが「OCR上に無い」「探索範囲外」「除外文脈」「弱小額/列整列ガード棄却」のどれに近いかを切り分ける
+- `230` / `148` / `商品代金` fallback の誤採用防止は維持する
+- `fileTooLarge` は画像取得/入力サイズの別問題として扱い、合計抽出ロジックの原因分析と混同しない
+
+### 期待trace例
+
+```text
+ReceiptOcrService.candidate: totalCandidate scan_start label_line_idx=6 window=2 token_count=10
+ReceiptOcrService.candidate: totalCandidate scan_line line_idx=4 label_line_idx=6 delta=-2 amount_candidates=[230] has_currency=false excluded=false weak_small=true neighbor_excluded=false right_aligned=false route=total_label_nearby classification=would_reject_weak_small_amount
+ReceiptOcrService.candidate: totalCandidate scan_line line_idx=5 label_line_idx=6 delta=-1 amount_candidates=[148] has_currency=false excluded=false weak_small=true neighbor_excluded=true right_aligned=false route=total_label_nearby classification=would_reject_neighbor_context
+ReceiptOcrService.candidate: totalCandidate scan_summary label_line_idx=6 total_amount_tokens=3 accepted_candidates=0 rejected_candidates=3
+ReceiptOcrService.candidate: totalCandidate amount_inventory_start reason=label_present_total_null max_candidates=20
+ReceiptOcrService.candidate: totalCandidate amount_inventory line_idx=12 delta_from_label=6 amount=670 has_currency=true excluded=false weak_small=false y_bucket=bottom x_bucket=right classification=outside_nearby_window
+ReceiptOcrService.candidate: totalCandidate amount_inventory_summary total_candidates=5 emitted=5 capped=false
+```
+
+### 分類（classification）固定文字列
+
+- `would_accept_same_line` / `would_accept_below_line` / `would_accept_nearby`
+- `would_reject_excluded_context` / `would_reject_weak_small_amount` / `would_reject_neighbor_context`
+- `would_reject_no_currency_mark` / `would_reject_serial_or_receipt_number`
+- `outside_nearby_window` / `not_amount`
+
+### inventory 出力条件
+
+- `合計` 系のラベル候補が 1 件以上検出された × 最終 `totalAmount=null` のときだけ出力する
+- 安全に合計が確定したケースでは inventory を出さない（ノイズ抑止）
+- `fileTooLarge` などの画像取得失敗は OCR 抽出 trace と別系統で記録する
+
+### PII非保存ルール
+
+- traceにOCR行原文、OCR全文、住所、電話番号、会員番号、伝票番号全文を出さない
+- 出してよい情報は `line_idx`, `label_line_idx`, `delta`, `amount`, `has_currency`, `route`, `excluded_context`, `weak_small`, `neighbor_excluded`, bbox要約（`x_bucket=left|center|right` / `y_bucket=top|mid|bottom`）、分類名に限定する
+
+### Step 25 確認手順
+
+```bash
+flutter test test/receipt_ocr_test.dart --plain-name "Step25"
+flutter test test/receipt_ocr_test.dart --plain-name "Step24"
+flutter analyze
+flutter test
+flutter build web
+```
+
 ## トラブルシューティング
 
 ### RLS 42501 エラー（カテゴリ追加/取引保存が失敗する）
