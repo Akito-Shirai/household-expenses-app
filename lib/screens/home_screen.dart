@@ -10,6 +10,7 @@ import '../theme/app_theme.dart';
 import '../utils/error_handler.dart';
 import '../utils/fx_converter.dart';
 import '../utils/fx_fetch_service.dart';
+import '../utils/transaction_default_date.dart';
 import '../widgets/state_views.dart';
 import 'analytics_screen.dart';
 import 'settings_screen.dart';
@@ -44,7 +45,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// フォールバック用のデフォルト設定
   UserSettings get _settings =>
-      _userSettings ?? UserSettings.defaults(supabase.auth.currentUser?.id ?? '');
+      _userSettings ??
+      UserSettings.defaults(supabase.auth.currentUser?.id ?? '');
 
   @override
   void initState() {
@@ -87,9 +89,7 @@ class _HomeScreenState extends State<HomeScreen> {
           mounted) {
         _rateMissingNotified = true;
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('為替レートが未設定のため、JPYで表示しています'),
-          ),
+          const SnackBar(content: Text('為替レートが未設定のため、JPYで表示しています')),
         );
       }
       // 設定が正常に反映された場合はフラグをリセット（次回通貨変更時に再通知可能に）
@@ -186,12 +186,21 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// 取引追加/編集画面へ遷移
   Future<void> _openTransactionEdit({model.Transaction? existing}) async {
+    // 新規追加時のみ、表示中年月に応じた初期日付を渡す
+    final initialDate = existing == null
+        ? defaultDateForNewTransaction(
+            year: _year,
+            month: _month,
+            transactions: _transactions,
+          )
+        : null;
     final result = await Navigator.push<bool>(
       context,
       MaterialPageRoute(
         builder: (_) => TransactionEditScreen(
           existing: existing,
           userSettings: _settings,
+          initialDate: initialDate,
         ),
       ),
     );
@@ -229,10 +238,7 @@ class _HomeScreenState extends State<HomeScreen> {
             // 収支（最も強調）
             Text(
               '収支',
-              style: TextStyle(
-                fontSize: 13,
-                color: AppTheme.subtleText,
-              ),
+              style: TextStyle(fontSize: 13, color: AppTheme.subtleText),
             ),
             const SizedBox(height: AppTheme.spacingXs),
             Text(
@@ -319,10 +325,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _summaryItem(String label, int amount, Color color) {
     return Column(
       children: [
-        Text(
-          label,
-          style: TextStyle(fontSize: 12, color: AppTheme.subtleText),
-        ),
+        Text(label, style: TextStyle(fontSize: 12, color: AppTheme.subtleText)),
         const SizedBox(height: AppTheme.spacingXs),
         Text(
           MoneyFormatter.formatSigned(amount, _settings),
@@ -369,7 +372,9 @@ class _HomeScreenState extends State<HomeScreen> {
       delegate: SliverChildBuilderDelegate((context, index) {
         final tx = _transactions[index];
         final isExpense = tx.type == 'expense';
-        final txColor = isExpense ? AppTheme.expenseColor : AppTheme.incomeColor;
+        final txColor = isExpense
+            ? AppTheme.expenseColor
+            : AppTheme.incomeColor;
         return ListTile(
           leading: Icon(
             isExpense ? Icons.remove_circle_outline : Icons.add_circle_outline,
@@ -380,11 +385,12 @@ class _HomeScreenState extends State<HomeScreen> {
             '${tx.date.month}/${tx.date.day}${tx.memo != null && tx.memo!.isNotEmpty ? '  ${tx.memo}' : ''}',
           ),
           trailing: Text(
-            MoneyFormatter.formatWithSign(tx.amount, _settings, isExpense: isExpense),
-            style: TextStyle(
-              fontWeight: FontWeight.w600,
-              color: txColor,
+            MoneyFormatter.formatWithSign(
+              tx.amount,
+              _settings,
+              isExpense: isExpense,
             ),
+            style: TextStyle(fontWeight: FontWeight.w600, color: txColor),
           ),
           onTap: () => _openTransactionEdit(existing: tx),
         );
@@ -427,11 +433,8 @@ class _HomeScreenState extends State<HomeScreen> {
       body: _isLoading
           ? const LoadingView(message: '読み込み中...')
           : _errorMessage != null
-              ? ErrorStateView(
-                  message: _errorMessage!,
-                  onRetry: _load,
-                )
-              : CustomScrollView(
+          ? ErrorStateView(message: _errorMessage!, onRetry: _load)
+          : CustomScrollView(
               slivers: [
                 // 年月ナビゲーション
                 SliverToBoxAdapter(

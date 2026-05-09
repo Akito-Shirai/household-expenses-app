@@ -145,10 +145,7 @@ void main() {
             body: Column(
               children: [
                 // 通常状態
-                FilledButton(
-                  onPressed: () {},
-                  child: const Text('追加する'),
-                ),
+                FilledButton(onPressed: () {}, child: const Text('追加する')),
                 // 保存中状態
                 const FilledButton(
                   onPressed: null,
@@ -225,11 +222,7 @@ void main() {
       // 新規モード相当: AppBarにdeleteアイコンなし
       await tester.pumpWidget(
         MaterialApp(
-          home: Scaffold(
-            appBar: AppBar(
-              title: const Text('取引追加'),
-            ),
-          ),
+          home: Scaffold(appBar: AppBar(title: const Text('取引追加'))),
         ),
       );
 
@@ -257,8 +250,9 @@ void main() {
                         ),
                         FilledButton(
                           style: FilledButton.styleFrom(
-                            backgroundColor:
-                                Theme.of(context).colorScheme.error,
+                            backgroundColor: Theme.of(
+                              context,
+                            ).colorScheme.error,
                           ),
                           onPressed: () => Navigator.pop(context, true),
                           child: const Text('削除'),
@@ -335,19 +329,37 @@ void main() {
     test('取引削除後のサマリーが正しく再計算される', () {
       final before = [
         Transaction(
-          id: '1', userId: 'u', date: DateTime(2026, 2, 1),
-          type: 'expense', amount: 1000, categoryId: 'c1',
-          categoryName: '食費', createdAt: DateTime.now(), updatedAt: DateTime.now(),
+          id: '1',
+          userId: 'u',
+          date: DateTime(2026, 2, 1),
+          type: 'expense',
+          amount: 1000,
+          categoryId: 'c1',
+          categoryName: '食費',
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
         ),
         Transaction(
-          id: '2', userId: 'u', date: DateTime(2026, 2, 2),
-          type: 'expense', amount: 500, categoryId: 'c1',
-          categoryName: '食費', createdAt: DateTime.now(), updatedAt: DateTime.now(),
+          id: '2',
+          userId: 'u',
+          date: DateTime(2026, 2, 2),
+          type: 'expense',
+          amount: 500,
+          categoryId: 'c1',
+          categoryName: '食費',
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
         ),
         Transaction(
-          id: '3', userId: 'u', date: DateTime(2026, 2, 3),
-          type: 'income', amount: 3000, categoryId: 'c2',
-          categoryName: '給与', createdAt: DateTime.now(), updatedAt: DateTime.now(),
+          id: '3',
+          userId: 'u',
+          date: DateTime(2026, 2, 3),
+          type: 'income',
+          amount: 3000,
+          categoryId: 'c2',
+          categoryName: '給与',
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
         ),
       ];
 
@@ -375,9 +387,15 @@ void main() {
     test('唯一の取引を削除した場合のカテゴリ別集計', () {
       final transactions = [
         Transaction(
-          id: '1', userId: 'u', date: DateTime(2026, 2, 1),
-          type: 'expense', amount: 1000, categoryId: 'c1',
-          categoryName: '食費', createdAt: DateTime.now(), updatedAt: DateTime.now(),
+          id: '1',
+          userId: 'u',
+          date: DateTime(2026, 2, 1),
+          type: 'expense',
+          amount: 1000,
+          categoryId: 'c1',
+          categoryName: '食費',
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
         ),
       ];
 
@@ -518,7 +536,8 @@ void main() {
       try {
         await Supabase.initialize(
           url: 'https://test.supabase.co',
-          anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.'
+          anonKey:
+              'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.'
               'eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRlc3QiLCJyb2xlIjoiYW5vbiIs'
               'ImlhdCI6MTYyMDAwMDAwMCwiZXhwIjoxOTM1NjAwMDAwfQ.'
               'test_signature',
@@ -567,9 +586,9 @@ void main() {
     }
 
     testWidgets('browserBlocked: SnackBar文言 + 再試行表示', (tester) async {
-      await tester.pumpWidget(buildScreen(
-        const PickImageResult(PickImageStatus.browserBlocked),
-      ));
+      await tester.pumpWidget(
+        buildScreen(const PickImageResult(PickImageStatus.browserBlocked)),
+      );
       await waitForFormReady(tester);
       await tapOcrAndSettle(tester);
 
@@ -581,9 +600,9 @@ void main() {
     });
 
     testWidgets('fileReadError: SnackBar文言 + 再試行表示', (tester) async {
-      await tester.pumpWidget(buildScreen(
-        const PickImageResult(PickImageStatus.fileReadError),
-      ));
+      await tester.pumpWidget(
+        buildScreen(const PickImageResult(PickImageStatus.fileReadError)),
+      );
       await waitForFormReady(tester);
       await tapOcrAndSettle(tester);
 
@@ -595,9 +614,9 @@ void main() {
     });
 
     testWidgets('unsupportedFormat: SnackBar文言 + 再試行表示', (tester) async {
-      await tester.pumpWidget(buildScreen(
-        const PickImageResult(PickImageStatus.unsupportedFormat),
-      ));
+      await tester.pumpWidget(
+        buildScreen(const PickImageResult(PickImageStatus.unsupportedFormat)),
+      );
       await waitForFormReady(tester);
       await tapOcrAndSettle(tester);
 
@@ -609,9 +628,9 @@ void main() {
     });
 
     testWidgets('fileTooLarge: SnackBar文言 + 再試行表示', (tester) async {
-      await tester.pumpWidget(buildScreen(
-        const PickImageResult(PickImageStatus.fileTooLarge),
-      ));
+      await tester.pumpWidget(
+        buildScreen(const PickImageResult(PickImageStatus.fileTooLarge)),
+      );
       await waitForFormReady(tester);
       await tapOcrAndSettle(tester);
 
@@ -623,23 +642,20 @@ void main() {
     });
 
     testWidgets('unknown: SnackBar文言 + 再試行表示', (tester) async {
-      await tester.pumpWidget(buildScreen(
-        const PickImageResult(PickImageStatus.unknown),
-      ));
+      await tester.pumpWidget(
+        buildScreen(const PickImageResult(PickImageStatus.unknown)),
+      );
       await waitForFormReady(tester);
       await tapOcrAndSettle(tester);
 
-      expect(
-        find.text(PickImageStatus.unknown.defaultMessage),
-        findsOneWidget,
-      );
+      expect(find.text(PickImageStatus.unknown.defaultMessage), findsOneWidget);
       expect(find.text('再試行'), findsOneWidget);
     });
 
     testWidgets('permissionDenied: 権限ダイアログ表示', (tester) async {
-      await tester.pumpWidget(buildScreen(
-        const PickImageResult(PickImageStatus.permissionDenied),
-      ));
+      await tester.pumpWidget(
+        buildScreen(const PickImageResult(PickImageStatus.permissionDenied)),
+      );
       await waitForFormReady(tester);
       await tapOcrAndSettle(tester);
 
@@ -649,43 +665,51 @@ void main() {
       expect(find.text('設定を開く'), findsOneWidget);
     });
 
-    testWidgets('canceled: 通知なし（SnackBar・ダイアログとも表示されない）',
-        (tester) async {
-      await tester.pumpWidget(buildScreen(
-        const PickImageResult(PickImageStatus.canceled),
-      ));
+    testWidgets('canceled: 通知なし（SnackBar・ダイアログとも表示されない）', (tester) async {
+      await tester.pumpWidget(
+        buildScreen(const PickImageResult(PickImageStatus.canceled)),
+      );
       await waitForFormReady(tester);
       await tapOcrAndSettle(tester);
 
       // エラー系SnackBarが表示されない（カテゴリ読み込みエラーのSnackBarは除外して検証）
       expect(find.text('カメラ/写真へのアクセス'), findsNothing);
-      expect(find.text(PickImageStatus.browserBlocked.defaultMessage), findsNothing);
+      expect(
+        find.text(PickImageStatus.browserBlocked.defaultMessage),
+        findsNothing,
+      );
       expect(find.text(PickImageStatus.unknown.defaultMessage), findsNothing);
     });
 
     testWidgets('success: OCR処理開始（エラー表示なし）', (tester) async {
-      await tester.pumpWidget(buildScreen(
-        PickImageResult(
-          PickImageStatus.success,
-          imageBytes: Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]),
+      await tester.pumpWidget(
+        buildScreen(
+          PickImageResult(
+            PickImageStatus.success,
+            imageBytes: Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]),
+          ),
         ),
-      ));
+      );
       await waitForFormReady(tester);
       await tapOcrAndSettle(tester);
 
       // エラー系のSnackBar・ダイアログは表示されない
       expect(find.text('カメラ/写真へのアクセス'), findsNothing);
-      expect(find.text(PickImageStatus.browserBlocked.defaultMessage), findsNothing);
+      expect(
+        find.text(PickImageStatus.browserBlocked.defaultMessage),
+        findsNothing,
+      );
     });
 
-    testWidgets('errorDetail設定時: カスタムメッセージが優先表示される',
-        (tester) async {
-      await tester.pumpWidget(buildScreen(
-        const PickImageResult(
-          PickImageStatus.fileTooLarge,
-          errorDetail: '画像サイズが大きすぎます（15.2MB）。10MB以下の画像を選択してください。',
+    testWidgets('errorDetail設定時: カスタムメッセージが優先表示される', (tester) async {
+      await tester.pumpWidget(
+        buildScreen(
+          const PickImageResult(
+            PickImageStatus.fileTooLarge,
+            errorDetail: '画像サイズが大きすぎます（15.2MB）。10MB以下の画像を選択してください。',
+          ),
         ),
-      ));
+      );
       await waitForFormReady(tester);
       await tapOcrAndSettle(tester);
 
@@ -696,20 +720,21 @@ void main() {
       expect(find.text('再試行'), findsOneWidget);
     });
 
-    testWidgets('連続browserBlocked: 2回目で強調メッセージに切り替わる',
-        (tester) async {
+    testWidgets('連続browserBlocked: 2回目で強調メッセージに切り替わる', (tester) async {
       final adapter = _SequentialMockImagePickAdapter([
         const PickImageResult(PickImageStatus.browserBlocked),
         const PickImageResult(PickImageStatus.browserBlocked),
       ]);
-      await tester.pumpWidget(MaterialApp(
-        home: TransactionEditScreen(
-          userSettings: UserSettings.defaults('test-user'),
-          imagePickAdapter: adapter,
-          ocrEngine: _MockOcrEngine(),
-          imageSourceSelector: (_) async => ImageSource.gallery,
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TransactionEditScreen(
+            userSettings: UserSettings.defaults('test-user'),
+            imagePickAdapter: adapter,
+            ocrEngine: _MockOcrEngine(),
+            imageSourceSelector: (_) async => ImageSource.gallery,
+          ),
         ),
-      ));
+      );
       await waitForFormReady(tester);
 
       // 1回目: 通常の browserBlocked メッセージ
@@ -737,20 +762,23 @@ void main() {
       );
     });
 
-    testWidgets('fileTooLarge後のbrowserBlocked: 連続カウントされない（通常文言）',
-        (tester) async {
+    testWidgets('fileTooLarge後のbrowserBlocked: 連続カウントされない（通常文言）', (
+      tester,
+    ) async {
       final adapter = _SequentialMockImagePickAdapter([
         const PickImageResult(PickImageStatus.fileTooLarge),
         const PickImageResult(PickImageStatus.browserBlocked),
       ]);
-      await tester.pumpWidget(MaterialApp(
-        home: TransactionEditScreen(
-          userSettings: UserSettings.defaults('test-user'),
-          imagePickAdapter: adapter,
-          ocrEngine: _MockOcrEngine(),
-          imageSourceSelector: (_) async => ImageSource.gallery,
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TransactionEditScreen(
+            userSettings: UserSettings.defaults('test-user'),
+            imagePickAdapter: adapter,
+            ocrEngine: _MockOcrEngine(),
+            imageSourceSelector: (_) async => ImageSource.gallery,
+          ),
         ),
-      ));
+      );
       await waitForFormReady(tester);
 
       // 1回目: fileTooLarge
@@ -783,11 +811,10 @@ void main() {
       );
     });
 
-    testWidgets('permissionDenied: 「手入力で続ける」タップでダイアログが閉じる',
-        (tester) async {
-      await tester.pumpWidget(buildScreen(
-        const PickImageResult(PickImageStatus.permissionDenied),
-      ));
+    testWidgets('permissionDenied: 「手入力で続ける」タップでダイアログが閉じる', (tester) async {
+      await tester.pumpWidget(
+        buildScreen(const PickImageResult(PickImageStatus.permissionDenied)),
+      );
       await waitForFormReady(tester);
       await tapOcrAndSettle(tester);
       expect(find.text('カメラ/写真へのアクセス'), findsOneWidget);
@@ -798,6 +825,163 @@ void main() {
 
       // ダイアログが閉じている
       expect(find.text('カメラ/写真へのアクセス'), findsNothing);
+    });
+  });
+
+  group('取引編集: 新規作成時の初期日付 (Step26)', () {
+    // initialDate が新規追加でのみ反映され、編集時は existing.date が優先される
+    // ことを実画面 pumpWidget で検証する。
+
+    setUpAll(() async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues({});
+      try {
+        await Supabase.initialize(
+          url: 'https://test.supabase.co',
+          anonKey:
+              'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.'
+              'eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRlc3QiLCJyb2xlIjoiYW5vbiIs'
+              'ImlhdCI6MTYyMDAwMDAwMCwiZXhwIjoxOTM1NjAwMDAwfQ.'
+              'test_signature',
+        );
+      } catch (_) {
+        // 既に初期化済みなら無視
+      }
+    });
+
+    /// カテゴリ読み込み失敗を待ち、フォーム表示に遷移させるヘルパー
+    Future<void> waitForFormReady(WidgetTester tester) async {
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump();
+      final messenger = tester.state<ScaffoldMessengerState>(
+        find.byType(ScaffoldMessenger),
+      );
+      messenger.clearSnackBars();
+      await tester.pump();
+    }
+
+    testWidgets('新規作成: initialDate が日付欄に反映される', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TransactionEditScreen(
+            userSettings: UserSettings.defaults('test-user'),
+            initialDate: DateTime(2026, 2, 15),
+          ),
+        ),
+      );
+      await waitForFormReady(tester);
+
+      // 日付欄に 2026/02/15 が表示される
+      expect(find.text('2026/02/15'), findsOneWidget);
+    });
+
+    testWidgets('新規作成: initialDate 未指定なら本日が反映される', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TransactionEditScreen(
+            userSettings: UserSettings.defaults('test-user'),
+          ),
+        ),
+      );
+      await waitForFormReady(tester);
+
+      final today = DateTime.now();
+      final expected =
+          '${today.year}/${today.month.toString().padLeft(2, '0')}/${today.day.toString().padLeft(2, '0')}';
+      expect(find.text(expected), findsOneWidget);
+    });
+
+    testWidgets('編集モード: existing.date が initialDate より優先される', (tester) async {
+      final existing = Transaction(
+        id: 'tx-1',
+        userId: 'u',
+        categoryId: 'c1',
+        date: DateTime(2026, 3, 10),
+        type: 'expense',
+        amount: 1000,
+        unitPrice: 1000,
+        quantity: 1,
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TransactionEditScreen(
+            userSettings: UserSettings.defaults('test-user'),
+            existing: existing,
+            // 編集時は無視されるはず
+            initialDate: DateTime(2026, 2, 15),
+          ),
+        ),
+      );
+      await waitForFormReady(tester);
+
+      // 編集対象の日付が表示され、initialDate は反映されない
+      expect(find.text('2026/03/10'), findsOneWidget);
+      expect(find.text('2026/02/15'), findsNothing);
+    });
+
+    testWidgets('範囲外の過去日(2019/12/01)でも DatePicker が assertion なく開く', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TransactionEditScreen(
+            userSettings: UserSettings.defaults('test-user'),
+            initialDate: DateTime(2019, 12, 1),
+          ),
+        ),
+      );
+      await waitForFormReady(tester);
+
+      // 範囲外日付が日付欄に表示される
+      expect(find.text('2019/12/01'), findsOneWidget);
+
+      // 日付欄をタップして DatePicker を開く
+      await tester.tap(find.text('2019/12/01'));
+      await tester.pumpAndSettle();
+
+      // DatePicker が assertion なく開いている（CalendarDatePicker が出現する）
+      expect(find.byType(CalendarDatePicker), findsOneWidget);
+    });
+
+    testWidgets('範囲外の未来日(2031/01/01)でも DatePicker が assertion なく開く', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TransactionEditScreen(
+            userSettings: UserSettings.defaults('test-user'),
+            initialDate: DateTime(2031, 1, 1),
+          ),
+        ),
+      );
+      await waitForFormReady(tester);
+
+      expect(find.text('2031/01/01'), findsOneWidget);
+
+      await tester.tap(find.text('2031/01/01'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CalendarDatePicker), findsOneWidget);
+    });
+
+    testWidgets('範囲内日付(2026/05/09)でも DatePicker が開く（既存範囲との回帰）', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TransactionEditScreen(
+            userSettings: UserSettings.defaults('test-user'),
+            initialDate: DateTime(2026, 5, 9),
+          ),
+        ),
+      );
+      await waitForFormReady(tester);
+
+      await tester.tap(find.text('2026/05/09'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CalendarDatePicker), findsOneWidget);
     });
   });
 

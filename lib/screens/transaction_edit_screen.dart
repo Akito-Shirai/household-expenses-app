@@ -30,6 +30,9 @@ class TransactionEditScreen extends StatefulWidget {
   /// 通貨設定（表示通貨の記号表示に使用）
   final UserSettings userSettings;
 
+  /// 新規作成時の初期日付（編集時は無視され、existing.date が優先される）
+  final DateTime? initialDate;
+
   /// テスト用: 画像取得アダプタの注入
   @visibleForTesting
   final ImagePickAdapter? imagePickAdapter;
@@ -46,6 +49,7 @@ class TransactionEditScreen extends StatefulWidget {
     super.key,
     this.existing,
     required this.userSettings,
+    this.initialDate,
     this.imagePickAdapter,
     this.ocrEngine,
     this.imageSourceSelector,
@@ -65,7 +69,7 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
   final _txRepo = TransactionRepository(supabase);
 
   String _type = 'expense';
-  DateTime _date = DateTime.now();
+  late DateTime _date;
   String? _selectedCategoryId;
   List<Category> _categories = [];
   bool _isLoading = false;
@@ -99,15 +103,16 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
 
       if (tx.type == 'expense') {
         // 支出: 単価・個数を復元（unit_price未設定の既存データはamountを初期単価として補完）
-        _unitPriceController.text =
-            (tx.unitPrice ?? tx.amount).toString();
+        _unitPriceController.text = (tx.unitPrice ?? tx.amount).toString();
         _quantityController.text = tx.quantity.toString();
       } else {
         // 収入: 従来の金額入力
         _amountController.text = tx.amount.toString();
       }
     } else {
-      // 新規作成: 個数のデフォルト値を1に設定
+      // 新規作成: 表示中年月に応じた初期日付（未指定なら本日）
+      _date = widget.initialDate ?? DateTime.now();
+      // 個数のデフォルト値を1に設定
       _quantityController.text = '1';
     }
     _loadCategories();
@@ -154,11 +159,23 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
   }
 
   Future<void> _pickDate() async {
+    // Home の年月ナビゲーションは無制限なので、表示中月から渡される _date が
+    // 2020-01-01 以前 / 2030-12-31 以降になり得る。DatePicker の assertion を
+    // 避けるため、_date を必ず含むよう範囲を動的拡張する。
+    const defaultFirst = 2020;
+    const defaultLast = 2030;
+    final firstDate = _date.year < defaultFirst
+        ? DateTime(_date.year, _date.month, 1)
+        : DateTime(defaultFirst);
+    final lastDate = _date.year > defaultLast
+        // _date を含む月の末日（month + 1 の0日 = 当月末日）
+        ? DateTime(_date.year, _date.month + 1, 0)
+        : DateTime(defaultLast, 12, 31);
     final picked = await showDatePicker(
       context: context,
       initialDate: _date,
-      firstDate: DateTime(2020),
-      lastDate: DateTime(2030),
+      firstDate: firstDate,
+      lastDate: lastDate,
     );
     if (picked != null) {
       setState(() => _date = picked);
@@ -265,9 +282,11 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
       builder: (context) {
         return AlertDialog(
           title: const Text('取引削除'),
-          content: Text(isRecurring
-              ? 'この定期支出を削除しますか？\n削除するとこの日付の分は再生成されなくなります。'
-              : 'この取引を削除しますか？'),
+          content: Text(
+            isRecurring
+                ? 'この定期支出を削除しますか？\n削除するとこの日付の分は再生成されなくなります。'
+                : 'この取引を削除しますか？',
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -347,9 +366,9 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
     // 1日上限チェック
     if (ReceiptOcrService.isDailyLimitReached) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('本日のレシート読み取り上限に達しました')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('本日のレシート読み取り上限に達しました')));
       }
       return;
     }
@@ -395,10 +414,11 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
         _consecutiveBrowserBlockedCount = 0;
       }
       // 連続 browserBlocked 時はブラウザ制約の可能性を強調
-      final message = (_consecutiveBrowserBlockedCount >= 2 &&
+      final message =
+          (_consecutiveBrowserBlockedCount >= 2 &&
               pickResult.status == PickImageStatus.browserBlocked)
           ? 'ブラウザの制約により画像選択が繰り返し失敗しています。'
-              '別のブラウザで試すか、手入力で続けてください。'
+                '別のブラウザで試すか、手入力で続けてください。'
           : pickResult.displayMessage!;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -442,9 +462,9 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
     } catch (e) {
       if (mounted) {
         setState(() => _isOcrProcessing = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('読み取り中にエラーが発生しました')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('読み取り中にエラーが発生しました')));
       }
     }
   }
@@ -490,9 +510,7 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
         context: context,
         builder: (context) => AlertDialog(
           title: const Text('入力済みの値を上書き'),
-          content: const Text(
-            '既に入力されている値があります。\nレシートの読み取り結果で上書きしますか？',
-          ),
+          content: const Text('既に入力されている値があります。\nレシートの読み取り結果で上書きしますか？'),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -588,16 +606,15 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
             labelText: '合計金額',
             prefixText: '$_currencySymbol ',
             filled: true,
-            fillColor: Theme.of(context)
-                .colorScheme
-                .surfaceContainerHighest
-                .withAlpha(128),
+            fillColor: Theme.of(
+              context,
+            ).colorScheme.surfaceContainerHighest.withAlpha(128),
           ),
           child: Text(
             _calculatedAmount.toString(),
-            style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                  fontWeight: FontWeight.bold,
-                ),
+            style: Theme.of(
+              context,
+            ).textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.bold),
           ),
         ),
       ],
@@ -737,9 +754,7 @@ class _TransactionEditScreenState extends State<TransactionEditScreen> {
                                 ),
                               )
                             : const Icon(Icons.document_scanner_outlined),
-                        label: Text(
-                          _isOcrProcessing ? '読み取り中...' : 'レシート読み取り',
-                        ),
+                        label: Text(_isOcrProcessing ? '読み取り中...' : 'レシート読み取り'),
                       ),
                       const SizedBox(height: AppTheme.spacingMd),
                     ],
