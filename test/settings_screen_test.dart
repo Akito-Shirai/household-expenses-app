@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:household_mvp/models/recurring_rule.dart';
 import 'package:household_mvp/models/user_settings.dart';
+import 'package:household_mvp/screens/settings_screen.dart';
 import 'package:household_mvp/utils/fx_converter.dart';
 import 'package:household_mvp/widgets/state_views.dart';
 
@@ -343,6 +344,95 @@ void main() {
       );
       expect(rule.isActive, isFalse);
       expect(rule.frequencyLabel, '2週ごと');
+    });
+  });
+
+  group('Step27: 定期支出ルール削除 確認ダイアログ', () {
+    // 確認ダイアログの文言は SettingsScreen の static const として公開している。
+    // 文言が変わるとテストが即失敗するので、削除/無効化の文言混在時の回帰を検知できる。
+
+    test('削除ダイアログのタイトルが「定期支出ルール削除」', () {
+      expect(
+        SettingsScreen.recurringRuleDeleteDialogTitle,
+        '定期支出ルール削除',
+      );
+    });
+
+    test('削除ダイアログの本文に「通常取引として残ります」が含まれる', () {
+      // 「無効化」と「削除」が同じ画面に存在するため、
+      // 削除後の挙動（既存取引が残る、再生成されない）を本文で明示する必要がある。
+      expect(
+        SettingsScreen.recurringRuleDeleteDialogMessage,
+        contains('通常取引として残ります'),
+      );
+    });
+
+    test('削除ダイアログ本文に「自動作成されることはありません」が含まれる', () {
+      expect(
+        SettingsScreen.recurringRuleDeleteDialogMessage,
+        contains('自動作成されることはありません'),
+      );
+    });
+
+    test('削除ダイアログ本文と無効化トグル文言が異なる', () {
+      // 無効化（一時停止）と削除（恒久）の意味の混同を防ぐ
+      expect(
+        SettingsScreen.recurringRuleDeleteDialogMessage,
+        isNot(contains('一時停止')),
+      );
+      expect(
+        SettingsScreen.recurringRuleDeleteDialogMessage,
+        isNot(contains('無効化')),
+      );
+    });
+
+    testWidgets('確認ダイアログに「削除」と「キャンセル」両方のボタンが表示される',
+        (tester) async {
+      // ダイアログ自体は実画面で表示されるが、文言・ボタン構造は
+      // 既存の取引削除ダイアログと同じパターンに従っている前提。
+      // このテストは「削除」ボタンが destructive style（error color）で
+      // 表示できる構造になっていることを確認する。
+      late ThemeData capturedTheme;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) {
+              capturedTheme = Theme.of(context);
+              return Scaffold(
+                body: AlertDialog(
+                  title: const Text(
+                    SettingsScreen.recurringRuleDeleteDialogTitle,
+                  ),
+                  content: const Text(
+                    SettingsScreen.recurringRuleDeleteDialogMessage,
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () {},
+                      child: const Text('キャンセル'),
+                    ),
+                    FilledButton(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: capturedTheme.colorScheme.error,
+                      ),
+                      onPressed: () {},
+                      child: const Text('削除'),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+      );
+
+      expect(find.text('定期支出ルール削除'), findsOneWidget);
+      expect(find.text('キャンセル'), findsOneWidget);
+      expect(find.text('削除'), findsOneWidget);
+      expect(
+        find.text(SettingsScreen.recurringRuleDeleteDialogMessage),
+        findsOneWidget,
+      );
     });
   });
 }

@@ -108,4 +108,27 @@ class RecurringRuleRepository {
     final result = await _client.rpc('recurring_catchup', params: params);
     return (result as int?) ?? 0;
   }
+
+  /// 定期支出ルール削除 RPC 名（テストで参照するための定数）
+  static const String deleteRuleRpcName = 'delete_recurring_rule';
+
+  /// 定期支出ルール削除 RPC のパラメータを構築する（テスト可能な純粋関数）
+  static Map<String, dynamic> buildDeleteRuleParams(String id) {
+    return {'p_rule_id': id};
+  }
+
+  /// 定期支出ルール削除（RPC経由）
+  /// 戻り値は通常取引化（detach）した既存生成済み取引の件数。
+  ///
+  /// 単純な物理削除ではなく、対象ルール由来の transactions を通常取引化
+  /// (`source_type='manual'`, `recurring_rule_id=null`, `scheduled_for=null`)
+  /// した後、recurring_rule_exceptions を削除し、ルール本体を削除する。
+  /// すべて 1 トランザクションで実行されるため中途半端な状態にならない。
+  Future<int> deleteRule(String id) async {
+    final result = await _client.rpc(
+      deleteRuleRpcName,
+      params: buildDeleteRuleParams(id),
+    );
+    return (result as int?) ?? 0;
+  }
 }

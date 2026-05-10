@@ -19,6 +19,18 @@ import '../widgets/state_views.dart';
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
 
+  /// 定期支出ルール削除確認ダイアログのタイトル（テスト容易性のため公開）
+  static const String recurringRuleDeleteDialogTitle = '定期支出ルール削除';
+
+  /// 定期支出ルール削除確認ダイアログ本文（テスト容易性のため公開）
+  ///
+  /// 削除（destructive）と無効化（一時停止）を区別するため、
+  /// 削除後も既存取引が残ることと、再生成されないことを明示する。
+  static const String recurringRuleDeleteDialogMessage =
+      'この定期支出を削除しますか？\n'
+      '既に作成された取引は通常取引として残ります。\n'
+      '今後、この定期支出から自動作成されることはありません。';
+
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
@@ -651,9 +663,69 @@ class _SettingsScreenState extends State<SettingsScreen>
                 ? null
                 : () => _showRecurringRuleDialog(existing: rule),
           ),
+          // 削除ボタン（destructive）
+          IconButton(
+            icon: Icon(
+              Icons.delete_outline,
+              size: 20,
+              color: Theme.of(context).colorScheme.error,
+            ),
+            tooltip: '削除',
+            onPressed: _isSaving ? null : () => _deleteRecurringRule(rule),
+          ),
         ],
       ),
     );
+  }
+
+  /// 定期支出ルール削除（既存生成済み取引は通常取引として保持）
+  Future<void> _deleteRecurringRule(RecurringRule rule) async {
+    if (_isSaving) return;
+
+    // 確認ダイアログ
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text(SettingsScreen.recurringRuleDeleteDialogTitle),
+          content:
+              const Text(SettingsScreen.recurringRuleDeleteDialogMessage),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('キャンセル'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(context).colorScheme.error,
+              ),
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('削除'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _isSaving = true);
+    try {
+      await _recurringRepo.deleteRule(rule.id);
+      if (!mounted) return;
+      await _load();
+    } catch (e) {
+      if (mounted) {
+        await handleError(
+          context: context,
+          error: e,
+          debugLabel: '定期支出ルール削除エラー',
+          userMessage: '定期支出ルールの削除に失敗しました',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
+    }
   }
 
   /// 定期支出ルールの有効/無効を切り替え

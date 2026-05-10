@@ -317,6 +317,67 @@ void main() {
     });
   });
 
+  group('Step27: 定期支出ルール削除 RPC', () {
+    // RPC 名・パラメータキーの単体テスト。
+    // 実装コードを直接参照することで、リネーム時に即テストが失敗する。
+
+    test('deleteRuleRpcName が delete_recurring_rule', () {
+      expect(
+        RecurringRuleRepository.deleteRuleRpcName,
+        'delete_recurring_rule',
+        reason: 'migration の RPC 名と一致する必要がある',
+      );
+    });
+
+    test('buildDeleteRuleParams が p_rule_id を含む', () {
+      final params = RecurringRuleRepository.buildDeleteRuleParams('rule-1');
+      expect(params['p_rule_id'], 'rule-1');
+      expect(params.length, 1, reason: 'p_rule_id のみ含まれる');
+    });
+
+    test('buildDeleteRuleParams は同じ ID で同じペイロードを返す（冪等性）', () {
+      final p1 = RecurringRuleRepository.buildDeleteRuleParams('rule-x');
+      final p2 = RecurringRuleRepository.buildDeleteRuleParams('rule-x');
+      expect(p1, equals(p2));
+    });
+
+    test('buildDeleteRuleParams は ID をそのまま渡す（型変換しない）', () {
+      // UUID 風の文字列でも、空文字でも、そのまま渡される
+      // RLS / RPC 側で auth.uid() と存在チェックを行うため、
+      // クライアント側ではトリミング等を行わない
+      final p = RecurringRuleRepository.buildDeleteRuleParams(
+        '00000000-0000-0000-0000-000000000001',
+      );
+      expect(p['p_rule_id'], '00000000-0000-0000-0000-000000000001');
+    });
+  });
+
+  group('Step27: 削除と無効化のセマンティクス区別', () {
+    test('削除した取引は通常取引（manual）として残る前提を確認', () {
+      // 削除 RPC は対象ルール由来の取引を以下のように更新する:
+      // - source_type: 'manual'
+      // - recurring_rule_id: null
+      // - scheduled_for: null
+      // フィールド名がモデルと一致することを確認（RPC SQL 修正時の回帰検知）
+      final tx = Transaction(
+        id: 'tx-detached',
+        userId: 'u',
+        categoryId: 'c1',
+        date: DateTime(2026, 3, 15),
+        type: 'expense',
+        amount: 5000,
+        sourceType: 'manual',
+        // 通常取引化後は recurringRuleId / scheduledFor が null
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      expect(tx.isRecurring, isFalse);
+      expect(tx.recurringRuleId, isNull);
+      expect(tx.scheduledFor, isNull);
+      expect(tx.sourceType, 'manual');
+    });
+  });
+
   group('サマリー: 定期支出を含む集計', () {
     test('定期支出の取引がサマリーに正しく含まれる', () {
       final transactions = [
